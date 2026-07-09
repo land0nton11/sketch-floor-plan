@@ -98,6 +98,11 @@
   .prop-row input:focus,.prop-row select:focus{outline:none; border-color:var(--accent);}
   .prop-row input[type=color]{flex:0 0 40px; height:26px; padding:1px 2px; border:1px solid var(--border); border-radius:5px; background:#fff;}
   .prop-row input[type=checkbox]{flex:0 0 auto;}
+  .swatch-row{display:flex; flex-wrap:wrap; gap:4px; flex:1;}
+  .swatch{
+    width:20px; height:20px; border-radius:5px; border:1px solid rgba(0,0,0,.18); padding:0;
+  }
+  .swatch:hover{transform:scale(1.15); border-color:var(--accent);}
   .prop-btns{display:flex; flex-wrap:wrap; gap:5px; margin:8px 0;}
   .p-btn{
     padding:5px 9px; border:1px solid var(--border); border-radius:6px; background:#fbfbfc; font-size:12px;
@@ -255,6 +260,7 @@ function defaultState() {
     wallThickness: 114.3,                    // 4.5 in
     showRulers: true,
     showDims: true,
+    showOverlap: false,   // red outline on colliding furniture (opt-in)
     room: { vertices: [] },                  // [{x,y}] mm, closed polygon
     openings: [],   // {id, type:'door'|'window', wall, offset(center, mm from wall start), width, hinge:'left'|'right', dir:'in'|'out'}
     furniture: [],  // {id, kind, shape:'rect'|'circle', label, x, y, w, d, rot, color}  (array order = z-order)
@@ -443,6 +449,7 @@ function openingGeom(o) {
 
 function clampOpenings() {
   if (!roomClosed()) { state.openings = []; return; }
+  state.openings = state.openings.filter(o => Number.isInteger(o.wall) && o.wall >= 0 && o.wall < wallCount());
   for (const o of state.openings) {
     const len = wallLen(o.wall);
     o.width = clamp(o.width, 100, Math.max(100, len - 60));
@@ -602,11 +609,14 @@ function cancelModes() {
 /* dims in mm (w = along local x, d = along local y; "back" of item faces -y) */
 const LIBRARY = [
   { group: 'Seating', items: [
-    { key: 'sofa2',     label: 'Sofa (2-seat)', w: 1600, d: 900,  shape: 'rect', color: '#b9c7d8' },
-    { key: 'sofa3',     label: 'Sofa (3-seat)', w: 2100, d: 950,  shape: 'rect', color: '#b9c7d8' },
-    { key: 'sectional', label: 'Sectional',     w: 2800, d: 2000, shape: 'rect', color: '#b9c7d8' },
-    { key: 'armchair',  label: 'Armchair',      w: 900,  d: 850,  shape: 'rect', color: '#c3cfdd' },
-    { key: 'ottoman',   label: 'Ottoman',       w: 750,  d: 600,  shape: 'rect', color: '#cdd7e2' },
+    { key: 'sofa2',      label: 'Sofa (2-seat)',        w: 1600, d: 900,  shape: 'rect', color: '#b9c7d8' },
+    { key: 'sofa3',      label: 'Sofa (3-seat)',        w: 2100, d: 950,  shape: 'rect', color: '#b9c7d8' },
+    { key: 'chaiseL',    label: 'Couch, chaise left',   w: 2250, d: 1600, shape: 'rect', color: '#b9c7d8' },
+    { key: 'chaiseR',    label: 'Couch, chaise right',  w: 2250, d: 1600, shape: 'rect', color: '#b9c7d8' },
+    { key: 'sectional',  label: 'Sectional (left)',     w: 2800, d: 2000, shape: 'rect', color: '#b9c7d8' },
+    { key: 'sectionalR', label: 'Sectional (right)',    w: 2800, d: 2000, shape: 'rect', color: '#b9c7d8' },
+    { key: 'armchair',   label: 'Armchair',             w: 900,  d: 850,  shape: 'rect', color: '#c3cfdd' },
+    { key: 'ottoman',    label: 'Ottoman',              w: 750,  d: 600,  shape: 'rect', color: '#cdd7e2' },
   ]},
   { group: 'Tables', items: [
     { key: 'coffee',  label: 'Coffee table', w: 1200, d: 600, shape: 'rect', color: '#d9c9ae' },
@@ -650,9 +660,15 @@ const LIBRARY = [
 const DEFS = {};
 for (const g of LIBRARY) for (const it of g.items) DEFS[it.key] = it;
 
-/* rounded-rect path helper (mm coords, centered) */
+/* right-handed variants are a horizontal mirror of their base kind */
+const MIRROR_KINDS = { sectionalR: 'sectional', chaiseR: 'chaiseL' };
+
+/* rounded-rect path helper (mm coords, centered); safe for tiny/negative sizes */
 function rrPath(g, x, y, w, h, r) {
-  r = Math.min(r, w / 2, h / 2);
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  if (!isFinite(x + y + w + h + r)) return;
   g.beginPath();
   g.moveTo(x + r, y);
   g.arcTo(x + w, y, x + w, y + h, r);
@@ -663,9 +679,12 @@ function rrPath(g, x, y, w, h, r) {
 }
 
 /* Draw a furniture kind centered on origin in mm coords.
-   g is already translated/rotated; lw = desired line width in mm. */
+   g is already translated/rotated; lw = desired line width in mm (constant on
+   screen — that's intentional, like a pen). All *detail geometry* is
+   proportional to w/d so interior lines scale with the piece when resized. */
 function drawKind(g, kind, w, d, color, lw) {
   const hw = w / 2, hd = d / 2;
+  const m = Math.min(w, d);               // proportional reference
   g.fillStyle = color;
   g.strokeStyle = '#55565c';
   g.lineWidth = lw;
@@ -673,26 +692,51 @@ function drawKind(g, kind, w, d, color, lw) {
   const stroke = () => { g.fill(); g.stroke(); };
   const inner = () => { g.strokeStyle = 'rgba(60,60,70,.45)'; g.lineWidth = lw * 0.8; };
 
-  const base = kind.startsWith('custom:') ? kind.slice(7) : kind;
+  let base = kind.startsWith('custom:') ? kind.slice(7) : kind;
+  if (MIRROR_KINDS[base]) {
+    g.scale(-1, 1);
+    drawKind(g, MIRROR_KINDS[base], w, d, color, lw);
+    return;
+  }
 
   switch (base) {
     case 'sofa2': case 'sofa3': case 'armchair': {
-      rrPath(g, -hw, -hd, w, d, 90); stroke();
-      const back = Math.min(200, d * 0.24), arm = base === 'armchair' ? Math.min(140, w * 0.16) : Math.min(160, w * 0.11);
+      rrPath(g, -hw, -hd, w, d, m * 0.10); stroke();
+      const back = d * 0.22;
+      const arm = base === 'armchair' ? w * 0.16 : w * 0.10;
       inner();
       g.beginPath();
-      g.moveTo(-hw + arm, -hd + back); g.lineTo(hw - arm, -hd + back);           // back line
-      g.moveTo(-hw + arm, -hd + back); g.lineTo(-hw + arm, hd - 40);             // arms
-      g.moveTo(hw - arm, -hd + back); g.lineTo(hw - arm, hd - 40);
+      g.moveTo(-hw + arm, -hd + back); g.lineTo(hw - arm, -hd + back);       // back line
+      g.moveTo(-hw + arm, -hd + back); g.lineTo(-hw + arm, hd - d * 0.05);   // arms
+      g.moveTo(hw - arm, -hd + back); g.lineTo(hw - arm, hd - d * 0.05);
       const n = base === 'sofa3' ? 3 : base === 'sofa2' ? 2 : 1;
       const seatW = (w - 2 * arm) / n;
       for (let i = 1; i < n; i++) {
-        g.moveTo(-hw + arm + i * seatW, -hd + back); g.lineTo(-hw + arm + i * seatW, hd - 60);
+        g.moveTo(-hw + arm + i * seatW, -hd + back);
+        g.lineTo(-hw + arm + i * seatW, hd - d * 0.07);
       }
       g.stroke();
       break;
     }
-    case 'sectional': {
+    case 'chaiseL': {                      // couch with a chaise on the left end
+      const bd = d * 0.58, cw = w * 0.34;  // body depth, chaise width
+      g.beginPath();
+      g.moveTo(-hw, -hd); g.lineTo(hw, -hd); g.lineTo(hw, -hd + bd);
+      g.lineTo(-hw + cw, -hd + bd); g.lineTo(-hw + cw, hd); g.lineTo(-hw, hd);
+      g.closePath(); stroke();
+      const back = d * 0.14, arm = w * 0.08;
+      inner();
+      g.beginPath();
+      g.moveTo(-hw + arm, -hd + back); g.lineTo(hw - arm, -hd + back);            // back line
+      g.moveTo(hw - arm, -hd + back); g.lineTo(hw - arm, -hd + bd - d * 0.03);    // right arm
+      g.moveTo(-hw + arm, -hd + back); g.lineTo(-hw + arm, hd - d * 0.03);        // left arm along chaise
+      g.moveTo(-hw + cw, -hd + back); g.lineTo(-hw + cw, -hd + bd - d * 0.03);    // chaise divider
+      const midX = (-hw + cw + hw - arm) / 2;
+      g.moveTo(midX, -hd + back); g.lineTo(midX, -hd + bd - d * 0.05);            // seat divider
+      g.stroke();
+      break;
+    }
+    case 'sectional': {                    // return corner on the left
       const barD = d * 0.45, barW = w * 0.38;
       g.beginPath();
       g.moveTo(-hw, -hd); g.lineTo(hw, -hd); g.lineTo(hw, -hd + barD);
@@ -700,50 +744,52 @@ function drawKind(g, kind, w, d, color, lw) {
       g.closePath(); stroke();
       inner();
       g.beginPath();
-      g.moveTo(-hw + 140, -hd + 140); g.lineTo(hw - 60, -hd + 140);      // back cushion line
-      g.moveTo(-hw + 140, -hd + 140); g.lineTo(-hw + 140, hd - 60);      // side cushion line
-      g.moveTo(-hw + barW, -hd + barD); g.lineTo(-hw + barW * 0.55, -hd + barD * 0.55);
+      g.moveTo(-hw + w * 0.05, -hd + d * 0.07); g.lineTo(hw - w * 0.02, -hd + d * 0.07);  // back cushion line
+      g.moveTo(-hw + w * 0.05, -hd + d * 0.07); g.lineTo(-hw + w * 0.05, hd - d * 0.02);  // side cushion line
+      g.moveTo(-hw + barW, -hd + barD); g.lineTo(-hw + barW * 0.55, -hd + barD * 0.55);   // corner seam
       g.stroke();
       break;
     }
-    case 'ottoman': rrPath(g, -hw, -hd, w, d, 100); stroke(); break;
+    case 'ottoman': rrPath(g, -hw, -hd, w, d, m * 0.15); stroke(); break;
     case 'coffee': case 'side': case 'console': case 'desk': case 'dinetable': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
-      inner(); const ins = Math.min(60, w * 0.08, d * 0.08);
+      inner(); const ins = m * 0.08;
       g.strokeRect(-hw + ins, -hd + ins, w - 2 * ins, d - 2 * ins);
       break;
     }
     case 'dineround': case 'gencircle': {
       g.beginPath(); g.ellipse(0, 0, hw, hd, 0, 0, Math.PI * 2); stroke();
       if (base === 'dineround') {
-        inner(); g.beginPath(); g.ellipse(0, 0, hw - 70, hd - 70, 0, 0, Math.PI * 2); g.stroke();
+        inner(); g.beginPath(); g.ellipse(0, 0, hw * 0.88, hd * 0.88, 0, 0, Math.PI * 2); g.stroke();
       }
       break;
     }
     case 'dinechair': {
-      rrPath(g, -hw, -hd + 60, w, d - 60, 70); stroke();
-      g.beginPath(); g.rect(-hw + 20, -hd, w - 40, 80); g.fill(); g.stroke();
+      rrPath(g, -hw, -hd + d * 0.12, w, d * 0.88, m * 0.15); stroke();
+      g.beginPath(); g.rect(-hw + w * 0.05, -hd, w * 0.9, d * 0.16); g.fill(); g.stroke();
       break;
     }
     case 'tv': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
       g.fillStyle = '#54565e';
-      g.fillRect(-w * 0.35, -hd + 30, w * 0.7, 70);      // the TV, on the back edge
+      g.fillRect(-w * 0.35, -hd + d * 0.07, w * 0.7, d * 0.16);   // the TV, on the back edge
       break;
     }
     case 'bookshelf': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
       inner(); g.beginPath();
-      const nDiv = Math.max(2, Math.round(w / 320));
+      const nDiv = Math.max(2, Math.round(w / 320));   // ~real-size compartments
       for (let i = 1; i < nDiv; i++) {
         const x = -hw + i * w / nDiv; g.moveTo(x, -hd); g.lineTo(x, hd);
       }
       g.stroke();
       break;
     }
-    case 'dresser': case 'nightstand': case 'console2': {
+    case 'dresser': case 'nightstand': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
-      inner(); g.beginPath(); g.moveTo(-hw + 40, 0); g.lineTo(hw - 40, 0); g.stroke();
+      inner(); g.beginPath();
+      g.moveTo(-hw + w * 0.05, 0); g.lineTo(hw - w * 0.05, 0);
+      g.stroke();
       break;
     }
     case 'wardrobe': {
@@ -755,33 +801,38 @@ function drawKind(g, kind, w, d, color, lw) {
       break;
     }
     case 'rugrect': {
-      rrPath(g, -hw, -hd, w, d, 60); stroke();
-      inner(); rrPath(g, -hw + 90, -hd + 90, w - 180, d - 180, 40); g.stroke();
+      rrPath(g, -hw, -hd, w, d, m * 0.04); stroke();
+      inner();
+      const ins = m * 0.07;
+      rrPath(g, -hw + ins, -hd + ins, w - 2 * ins, d - 2 * ins, m * 0.03);
+      g.stroke();
       break;
     }
     case 'ruground': {
       g.beginPath(); g.ellipse(0, 0, hw, hd, 0, 0, Math.PI * 2); stroke();
-      inner(); g.beginPath(); g.ellipse(0, 0, hw - 90, hd - 90, 0, 0, Math.PI * 2); g.stroke();
+      inner(); g.beginPath(); g.ellipse(0, 0, hw * 0.91, hd * 0.91, 0, 0, Math.PI * 2); g.stroke();
       break;
     }
     case 'bedtwin': case 'bedfull': case 'bedqueen': case 'bedking': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
       inner();
       const single = base === 'bedtwin';
-      const pw = single ? w - 200 : (w - 260) / 2, ph = Math.min(260, d * 0.16);
-      if (single) { rrPath(g, -pw / 2, -hd + 70, pw, ph, 50); g.stroke(); }
+      const pm = w * 0.06, ph = d * 0.13;                       // pillow margin & height
+      const pw = single ? w - 2 * pm : (w - 3 * pm) / 2;
+      const py = -hd + d * 0.035, pr = Math.min(pw, ph) * 0.35;
+      if (single) { rrPath(g, -pw / 2, py, pw, ph, pr); g.stroke(); }
       else {
-        rrPath(g, -hw + 90, -hd + 70, pw, ph, 50); g.stroke();
-        rrPath(g, hw - 90 - pw, -hd + 70, pw, ph, 50); g.stroke();
+        rrPath(g, -hw + pm, py, pw, ph, pr); g.stroke();
+        rrPath(g, hw - pm - pw, py, pw, ph, pr); g.stroke();
       }
       g.beginPath();
-      g.moveTo(-hw, -hd + ph + 190); g.lineTo(hw, -hd + ph + 190);   // blanket line
+      g.moveTo(-hw, py + ph + d * 0.12); g.lineTo(hw, py + ph + d * 0.12);   // blanket line
       g.stroke();
       break;
     }
     case 'officechair': {
-      g.beginPath(); g.ellipse(0, 40, hw - 40, hd - 80, 0, 0, Math.PI * 2); stroke();
-      g.beginPath(); g.rect(-hw * 0.75, -hd, hw * 1.5, 110); g.fill(); g.stroke();
+      g.beginPath(); g.ellipse(0, d * 0.06, hw - w * 0.06, hd - d * 0.12, 0, 0, Math.PI * 2); stroke();
+      g.beginPath(); g.rect(-hw * 0.75, -hd, hw * 1.5, d * 0.17); g.fill(); g.stroke();
       break;
     }
     case 'plant': {
@@ -813,13 +864,18 @@ function drawKind(g, kind, w, d, color, lw) {
   }
 }
 
-/* draw a placed furniture item (world transform assumed active, mm coords) */
+/* draw a placed furniture item (world transform assumed active, mm coords).
+   Guarded so one bad item can never freeze the whole canvas. */
 function drawFurniture(g, f, scale, ghost) {
   g.save();
-  g.translate(f.x, f.y);
-  g.rotate(rad(f.rot));
-  if (ghost) g.globalAlpha = 0.55;
-  drawKind(g, f.kind, f.w, f.d, f.color, 1.4 / scale);
+  try {
+    g.translate(f.x, f.y);
+    g.rotate(rad(f.rot));
+    if (ghost) g.globalAlpha = 0.55;
+    drawKind(g, f.kind, f.w, f.d, f.color, 1.4 / scale);
+  } catch (err) {
+    console.error('draw failed for', f.kind, err);
+  }
   g.restore();
 }
 /* ---------------- canvas & view ---------------- */
@@ -873,7 +929,18 @@ const COL = {
 };
 const RULER_W = 26;
 
-function render() { renderScene(ctx, view, { w: CW, h: CH, grid: state.grid.visible, dims: state.showDims, ui: true }); }
+function render() {
+  const dpr = window.devicePixelRatio || 1;
+  try {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderScene(ctx, view, { w: CW, h: CH, grid: state.grid.visible, dims: state.showDims, ui: true });
+  } catch (err) {
+    // never leave the canvas frozen on a stale frame: hard-reset the context
+    console.error('render failed:', err);
+    cvs.width = cvs.width;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+}
 
 /* opts: {w, h, grid, dims, ui, bg} — ui=false for image export */
 function renderScene(g, vw, opts) {
@@ -900,7 +967,7 @@ function renderScene(g, vw, opts) {
     if (opts.grid) { g.save(); g.clip(); drawGrid(g, sc, worldMin, worldMax, true); g.restore(); }
   }
 
-  const overlaps = computeOverlaps();
+  const overlaps = (opts.ui && state.showOverlap) ? computeOverlaps() : new Set();
 
   // furniture (array order = z-order)
   for (const f of state.furniture) {
@@ -2110,11 +2177,18 @@ function paletteIcon(def) {
   c.width = iw * dpr; c.height = ih * dpr;
   c.style.width = iw + 'px'; c.style.height = ih + 'px';
   const g = c.getContext('2d');
-  g.scale(dpr, dpr);
-  const sc = Math.min((iw - 10) / def.w, (ih - 8) / def.d);
-  g.translate(iw / 2, ih / 2);
-  g.scale(sc, sc);
-  drawKind(g, def.kind || def.key, def.w, def.d, def.color, 1.6 / sc);
+  try {
+    g.scale(dpr, dpr);
+    const sc = Math.min((iw - 10) / def.w, (ih - 8) / def.d);
+    g.translate(iw / 2, ih / 2);
+    g.scale(sc, sc);
+    drawKind(g, def.kind || def.key, def.w, def.d, def.color, 1.6 / sc);
+  } catch (err) {   // a broken palette entry must never take the app down
+    console.error('palette icon failed for', def.key, err);
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = def.color || '#ccd2da';
+    g.fillRect(iw / 2 - 16, ih / 2 - 10, 32, 20);
+  }
   return c;
 }
 
@@ -2195,6 +2269,46 @@ function lenInput(mm, onSet, allowNeg) {
   return inp;
 }
 
+/* quick-pick colors + live-updating picker for one or more furniture items */
+const SWATCHES = ['#ccd2da', '#b9c7d8', '#9fb6d0', '#cfdbd2', '#aecbaa', '#d9c9ae',
+                  '#cfc0a8', '#e8ddc8', '#d4b8c8', '#d9a7a0', '#c6c6d4', '#ded8c2'];
+
+function colorControls(items) {
+  const wrap = el('div');
+  const first = items()[0];
+  const col = el('input', { type: 'color', value: first ? first.color : '#ccd2da' });
+  let origs = null;
+  col.addEventListener('input', () => {          // live preview while picking
+    if (!origs) origs = items().map(f => f.color);
+    for (const f of items()) f.color = col.value;
+    render();
+  });
+  col.addEventListener('change', () => {         // commit once, as one undo step
+    const chosen = col.value;
+    const list = items();
+    if (origs) list.forEach((f, i) => { f.color = origs[i]; });
+    pushHistory();
+    for (const f of list) f.color = chosen;
+    origs = null;
+    commit();
+  });
+  wrap.append(propRow('Color', col));
+  const sw = el('div', { class: 'swatch-row' });
+  for (const c of SWATCHES) {
+    sw.append(el('button', {
+      class: 'swatch', style: 'background:' + c, title: c,
+      onclick: () => {
+        pushHistory();
+        for (const f of items()) f.color = c;
+        col.value = c;
+        commit();
+      },
+    }));
+  }
+  wrap.append(propRow('', sw));
+  return wrap;
+}
+
 function statRow(k, v) {
   return el('div', { class: 'stat-row' }, el('span', { text: k }), el('span', { text: v }));
 }
@@ -2250,6 +2364,12 @@ function propsRoom(p) {
   snapChk.checked = state.grid.snap;
   snapChk.addEventListener('change', () => { state.grid.snap = snapChk.checked; commit(); });
   p.append(propRow('Snap to grid', snapChk));
+
+  const ovChk = el('input', { type: 'checkbox' });
+  ovChk.checked = state.showOverlap;
+  ovChk.addEventListener('change', () => { state.showOverlap = ovChk.checked; commit(); });
+  p.append(propRow('Overlap warnings', ovChk));
+  p.append(el('div', { class: 'prop-note', text: 'When on, furniture that collides with another piece or crosses a wall gets a red dashed outline.' }));
 }
 
 function propsFurniture(p, f) {
@@ -2262,9 +2382,7 @@ function propsFurniture(p, f) {
   lbl.addEventListener('keydown', e => { if (e.key === 'Enter') lbl.blur(); });
   p.append(propRow('Label', lbl));
 
-  const col = el('input', { type: 'color', value: f.color });
-  col.addEventListener('change', () => { pushHistory(); f.color = col.value; commit(); });
-  p.append(propRow('Color', col));
+  p.append(colorControls(() => [furnById(f.id)].filter(Boolean)));
 
   p.append(propRow('Width', lenInput(f.w, v => { pushHistory(); f.w = clamp(v, 50, 20000); commit(); })));
   p.append(propRow('Depth', lenInput(f.d, v => { pushHistory(); f.d = clamp(v, 50, 20000); commit(); })));
@@ -2303,6 +2421,7 @@ function propsFurniture(p, f) {
 
 function propsMulti(p) {
   p.append(el('h3', { text: sel.furn.length + ' items selected' }));
+  p.append(colorControls(() => sel.furn.map(furnById).filter(Boolean)));
   p.append(el('div', { class: 'prop-btns' },
     pBtn('Duplicate', duplicateSelection),
     pBtn('⤒ Front', () => {
@@ -2373,7 +2492,8 @@ function propsWall(p, i) {
 
 /* ---------------- file operations ---------------- */
 function doNew() {
-  if (!confirm('Start a new layout? The current one stays available under Layouts if saved (and in auto-save until then).')) return;
+  // no blocking confirm: browsers can silently suppress dialogs, and this is
+  // fully undo-able anyway (Ctrl+Z brings the previous layout right back)
   pushHistory();
   const keepPalette = state.customPalette;
   const keepUnits = state.units;
@@ -2384,6 +2504,7 @@ function doNew() {
   view = { x: -CW / 2 / 0.12, y: -CH / 2 / 0.12, scale: 0.12 };
   buildPalette();
   commit();
+  toast('New layout — Ctrl+Z brings the previous one back');
 }
 
 function doSave() {
