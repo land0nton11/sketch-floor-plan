@@ -27,8 +27,12 @@ python3 -m http.server 8000     # then visit http://localhost:8000
   Move, rotate (handle or numeric), resize (handles or typed dimensions), duplicate
   (Ctrl+D), z-order, labels, colors. Custom rectangles/circles (`R` / `C`) can be drawn at
   any size and saved into the palette ("My items") for reuse.
-- **Overlap feedback** — pieces that collide with other furniture or cross a wall get a red
-  dashed outline (rugs are exempt from furniture overlap, so things can sit on them).
+- **Recolor anything** — select one or more placed pieces and use the color picker (live
+  preview) or the quick swatches in the properties panel; width/depth/rotation/label are
+  editable there too.
+- **Overlap warnings (opt-in)** — enable "Overlap warnings" in the settings panel (click
+  empty space to see it) to get a red dashed outline on furniture that collides with
+  another piece or crosses a wall. Off by default; rugs are exempt from furniture overlap.
 - **Units toggle** — imperial (`12′ 6″`, fractions accepted) ⇄ metric (`3.81 m`, `45 cm`),
   instant and display-only; all geometry is stored in millimeters.
 - **Grid, snapping, rulers** — configurable grid spacing, snap-to-grid (hold Alt to invert
@@ -37,6 +41,7 @@ python3 -m http.server 8000     # then visit http://localhost:8000
 - **Persistence** — auto-save to `localStorage`, named layouts (save / load / rename /
   delete), JSON export/import for backup, PNG export (current view or whole layout at a
   chosen scale, with/without grid and dimensions), and undo/redo (Ctrl+Z / Ctrl+Shift+Z).
+  "New" clears the canvas immediately (no dialog) — Ctrl+Z restores the previous layout.
 
 ## Keyboard shortcuts
 

@@ -98,6 +98,11 @@
   .prop-row input:focus,.prop-row select:focus{outline:none; border-color:var(--accent);}
   .prop-row input[type=color]{flex:0 0 40px; height:26px; padding:1px 2px; border:1px solid var(--border); border-radius:5px; background:#fff;}
   .prop-row input[type=checkbox]{flex:0 0 auto;}
+  .swatch-row{display:flex; flex-wrap:wrap; gap:4px; flex:1;}
+  .swatch{
+    width:20px; height:20px; border-radius:5px; border:1px solid rgba(0,0,0,.18); padding:0;
+  }
+  .swatch:hover{transform:scale(1.15); border-color:var(--accent);}
   .prop-btns{display:flex; flex-wrap:wrap; gap:5px; margin:8px 0;}
   .p-btn{
     padding:5px 9px; border:1px solid var(--border); border-radius:6px; background:#fbfbfc; font-size:12px;
@@ -255,6 +260,7 @@ function defaultState() {
     wallThickness: 114.3,                    // 4.5 in
     showRulers: true,
     showDims: true,
+    showOverlap: false,   // red outline on colliding furniture (opt-in)
     room: { vertices: [] },                  // [{x,y}] mm, closed polygon
     openings: [],   // {id, type:'door'|'window', wall, offset(center, mm from wall start), width, hinge:'left'|'right', dir:'in'|'out'}
     furniture: [],  // {id, kind, shape:'rect'|'circle', label, x, y, w, d, rot, color}  (array order = z-order)
@@ -443,6 +449,7 @@ function openingGeom(o) {
 
 function clampOpenings() {
   if (!roomClosed()) { state.openings = []; return; }
+  state.openings = state.openings.filter(o => Number.isInteger(o.wall) && o.wall >= 0 && o.wall < wallCount());
   for (const o of state.openings) {
     const len = wallLen(o.wall);
     o.width = clamp(o.width, 100, Math.max(100, len - 60));
@@ -650,9 +657,12 @@ const LIBRARY = [
 const DEFS = {};
 for (const g of LIBRARY) for (const it of g.items) DEFS[it.key] = it;
 
-/* rounded-rect path helper (mm coords, centered) */
+/* rounded-rect path helper (mm coords, centered); safe for tiny/negative sizes */
 function rrPath(g, x, y, w, h, r) {
-  r = Math.min(r, w / 2, h / 2);
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  if (!isFinite(x + y + w + h + r)) return;
   g.beginPath();
   g.moveTo(x + r, y);
   g.arcTo(x + w, y, x + w, y + h, r);
@@ -813,13 +823,18 @@ function drawKind(g, kind, w, d, color, lw) {
   }
 }
 
-/* draw a placed furniture item (world transform assumed active, mm coords) */
+/* draw a placed furniture item (world transform assumed active, mm coords).
+   Guarded so one bad item can never freeze the whole canvas. */
 function drawFurniture(g, f, scale, ghost) {
   g.save();
-  g.translate(f.x, f.y);
-  g.rotate(rad(f.rot));
-  if (ghost) g.globalAlpha = 0.55;
-  drawKind(g, f.kind, f.w, f.d, f.color, 1.4 / scale);
+  try {
+    g.translate(f.x, f.y);
+    g.rotate(rad(f.rot));
+    if (ghost) g.globalAlpha = 0.55;
+    drawKind(g, f.kind, f.w, f.d, f.color, 1.4 / scale);
+  } catch (err) {
+    console.error('draw failed for', f.kind, err);
+  }
   g.restore();
 }
 /* ---------------- canvas & view ---------------- */
@@ -873,7 +888,18 @@ const COL = {
 };
 const RULER_W = 26;
 
-function render() { renderScene(ctx, view, { w: CW, h: CH, grid: state.grid.visible, dims: state.showDims, ui: true }); }
+function render() {
+  const dpr = window.devicePixelRatio || 1;
+  try {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    renderScene(ctx, view, { w: CW, h: CH, grid: state.grid.visible, dims: state.showDims, ui: true });
+  } catch (err) {
+    // never leave the canvas frozen on a stale frame: hard-reset the context
+    console.error('render failed:', err);
+    cvs.width = cvs.width;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+}
 
 /* opts: {w, h, grid, dims, ui, bg} — ui=false for image export */
 function renderScene(g, vw, opts) {
@@ -900,7 +926,7 @@ function renderScene(g, vw, opts) {
     if (opts.grid) { g.save(); g.clip(); drawGrid(g, sc, worldMin, worldMax, true); g.restore(); }
   }
 
-  const overlaps = computeOverlaps();
+  const overlaps = (opts.ui && state.showOverlap) ? computeOverlaps() : new Set();
 
   // furniture (array order = z-order)
   for (const f of state.furniture) {
@@ -2110,11 +2136,18 @@ function paletteIcon(def) {
   c.width = iw * dpr; c.height = ih * dpr;
   c.style.width = iw + 'px'; c.style.height = ih + 'px';
   const g = c.getContext('2d');
-  g.scale(dpr, dpr);
-  const sc = Math.min((iw - 10) / def.w, (ih - 8) / def.d);
-  g.translate(iw / 2, ih / 2);
-  g.scale(sc, sc);
-  drawKind(g, def.kind || def.key, def.w, def.d, def.color, 1.6 / sc);
+  try {
+    g.scale(dpr, dpr);
+    const sc = Math.min((iw - 10) / def.w, (ih - 8) / def.d);
+    g.translate(iw / 2, ih / 2);
+    g.scale(sc, sc);
+    drawKind(g, def.kind || def.key, def.w, def.d, def.color, 1.6 / sc);
+  } catch (err) {   // a broken palette entry must never take the app down
+    console.error('palette icon failed for', def.key, err);
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = def.color || '#ccd2da';
+    g.fillRect(iw / 2 - 16, ih / 2 - 10, 32, 20);
+  }
   return c;
 }
 
@@ -2195,6 +2228,46 @@ function lenInput(mm, onSet, allowNeg) {
   return inp;
 }
 
+/* quick-pick colors + live-updating picker for one or more furniture items */
+const SWATCHES = ['#ccd2da', '#b9c7d8', '#9fb6d0', '#cfdbd2', '#aecbaa', '#d9c9ae',
+                  '#cfc0a8', '#e8ddc8', '#d4b8c8', '#d9a7a0', '#c6c6d4', '#ded8c2'];
+
+function colorControls(items) {
+  const wrap = el('div');
+  const first = items()[0];
+  const col = el('input', { type: 'color', value: first ? first.color : '#ccd2da' });
+  let origs = null;
+  col.addEventListener('input', () => {          // live preview while picking
+    if (!origs) origs = items().map(f => f.color);
+    for (const f of items()) f.color = col.value;
+    render();
+  });
+  col.addEventListener('change', () => {         // commit once, as one undo step
+    const chosen = col.value;
+    const list = items();
+    if (origs) list.forEach((f, i) => { f.color = origs[i]; });
+    pushHistory();
+    for (const f of list) f.color = chosen;
+    origs = null;
+    commit();
+  });
+  wrap.append(propRow('Color', col));
+  const sw = el('div', { class: 'swatch-row' });
+  for (const c of SWATCHES) {
+    sw.append(el('button', {
+      class: 'swatch', style: 'background:' + c, title: c,
+      onclick: () => {
+        pushHistory();
+        for (const f of items()) f.color = c;
+        col.value = c;
+        commit();
+      },
+    }));
+  }
+  wrap.append(propRow('', sw));
+  return wrap;
+}
+
 function statRow(k, v) {
   return el('div', { class: 'stat-row' }, el('span', { text: k }), el('span', { text: v }));
 }
@@ -2250,6 +2323,12 @@ function propsRoom(p) {
   snapChk.checked = state.grid.snap;
   snapChk.addEventListener('change', () => { state.grid.snap = snapChk.checked; commit(); });
   p.append(propRow('Snap to grid', snapChk));
+
+  const ovChk = el('input', { type: 'checkbox' });
+  ovChk.checked = state.showOverlap;
+  ovChk.addEventListener('change', () => { state.showOverlap = ovChk.checked; commit(); });
+  p.append(propRow('Overlap warnings', ovChk));
+  p.append(el('div', { class: 'prop-note', text: 'When on, furniture that collides with another piece or crosses a wall gets a red dashed outline.' }));
 }
 
 function propsFurniture(p, f) {
@@ -2262,9 +2341,7 @@ function propsFurniture(p, f) {
   lbl.addEventListener('keydown', e => { if (e.key === 'Enter') lbl.blur(); });
   p.append(propRow('Label', lbl));
 
-  const col = el('input', { type: 'color', value: f.color });
-  col.addEventListener('change', () => { pushHistory(); f.color = col.value; commit(); });
-  p.append(propRow('Color', col));
+  p.append(colorControls(() => [furnById(f.id)].filter(Boolean)));
 
   p.append(propRow('Width', lenInput(f.w, v => { pushHistory(); f.w = clamp(v, 50, 20000); commit(); })));
   p.append(propRow('Depth', lenInput(f.d, v => { pushHistory(); f.d = clamp(v, 50, 20000); commit(); })));
@@ -2303,6 +2380,7 @@ function propsFurniture(p, f) {
 
 function propsMulti(p) {
   p.append(el('h3', { text: sel.furn.length + ' items selected' }));
+  p.append(colorControls(() => sel.furn.map(furnById).filter(Boolean)));
   p.append(el('div', { class: 'prop-btns' },
     pBtn('Duplicate', duplicateSelection),
     pBtn('⤒ Front', () => {
@@ -2373,7 +2451,8 @@ function propsWall(p, i) {
 
 /* ---------------- file operations ---------------- */
 function doNew() {
-  if (!confirm('Start a new layout? The current one stays available under Layouts if saved (and in auto-save until then).')) return;
+  // no blocking confirm: browsers can silently suppress dialogs, and this is
+  // fully undo-able anyway (Ctrl+Z brings the previous layout right back)
   pushHistory();
   const keepPalette = state.customPalette;
   const keepUnits = state.units;
@@ -2384,6 +2463,7 @@ function doNew() {
   view = { x: -CW / 2 / 0.12, y: -CH / 2 / 0.12, scale: 0.12 };
   buildPalette();
   commit();
+  toast('New layout — Ctrl+Z brings the previous one back');
 }
 
 function doSave() {
