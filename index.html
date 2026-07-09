@@ -609,11 +609,14 @@ function cancelModes() {
 /* dims in mm (w = along local x, d = along local y; "back" of item faces -y) */
 const LIBRARY = [
   { group: 'Seating', items: [
-    { key: 'sofa2',     label: 'Sofa (2-seat)', w: 1600, d: 900,  shape: 'rect', color: '#b9c7d8' },
-    { key: 'sofa3',     label: 'Sofa (3-seat)', w: 2100, d: 950,  shape: 'rect', color: '#b9c7d8' },
-    { key: 'sectional', label: 'Sectional',     w: 2800, d: 2000, shape: 'rect', color: '#b9c7d8' },
-    { key: 'armchair',  label: 'Armchair',      w: 900,  d: 850,  shape: 'rect', color: '#c3cfdd' },
-    { key: 'ottoman',   label: 'Ottoman',       w: 750,  d: 600,  shape: 'rect', color: '#cdd7e2' },
+    { key: 'sofa2',      label: 'Sofa (2-seat)',        w: 1600, d: 900,  shape: 'rect', color: '#b9c7d8' },
+    { key: 'sofa3',      label: 'Sofa (3-seat)',        w: 2100, d: 950,  shape: 'rect', color: '#b9c7d8' },
+    { key: 'chaiseL',    label: 'Couch, chaise left',   w: 2250, d: 1600, shape: 'rect', color: '#b9c7d8' },
+    { key: 'chaiseR',    label: 'Couch, chaise right',  w: 2250, d: 1600, shape: 'rect', color: '#b9c7d8' },
+    { key: 'sectional',  label: 'Sectional (left)',     w: 2800, d: 2000, shape: 'rect', color: '#b9c7d8' },
+    { key: 'sectionalR', label: 'Sectional (right)',    w: 2800, d: 2000, shape: 'rect', color: '#b9c7d8' },
+    { key: 'armchair',   label: 'Armchair',             w: 900,  d: 850,  shape: 'rect', color: '#c3cfdd' },
+    { key: 'ottoman',    label: 'Ottoman',              w: 750,  d: 600,  shape: 'rect', color: '#cdd7e2' },
   ]},
   { group: 'Tables', items: [
     { key: 'coffee',  label: 'Coffee table', w: 1200, d: 600, shape: 'rect', color: '#d9c9ae' },
@@ -657,6 +660,9 @@ const LIBRARY = [
 const DEFS = {};
 for (const g of LIBRARY) for (const it of g.items) DEFS[it.key] = it;
 
+/* right-handed variants are a horizontal mirror of their base kind */
+const MIRROR_KINDS = { sectionalR: 'sectional', chaiseR: 'chaiseL' };
+
 /* rounded-rect path helper (mm coords, centered); safe for tiny/negative sizes */
 function rrPath(g, x, y, w, h, r) {
   if (w < 0) { x += w; w = -w; }
@@ -673,9 +679,12 @@ function rrPath(g, x, y, w, h, r) {
 }
 
 /* Draw a furniture kind centered on origin in mm coords.
-   g is already translated/rotated; lw = desired line width in mm. */
+   g is already translated/rotated; lw = desired line width in mm (constant on
+   screen — that's intentional, like a pen). All *detail geometry* is
+   proportional to w/d so interior lines scale with the piece when resized. */
 function drawKind(g, kind, w, d, color, lw) {
   const hw = w / 2, hd = d / 2;
+  const m = Math.min(w, d);               // proportional reference
   g.fillStyle = color;
   g.strokeStyle = '#55565c';
   g.lineWidth = lw;
@@ -683,26 +692,51 @@ function drawKind(g, kind, w, d, color, lw) {
   const stroke = () => { g.fill(); g.stroke(); };
   const inner = () => { g.strokeStyle = 'rgba(60,60,70,.45)'; g.lineWidth = lw * 0.8; };
 
-  const base = kind.startsWith('custom:') ? kind.slice(7) : kind;
+  let base = kind.startsWith('custom:') ? kind.slice(7) : kind;
+  if (MIRROR_KINDS[base]) {
+    g.scale(-1, 1);
+    drawKind(g, MIRROR_KINDS[base], w, d, color, lw);
+    return;
+  }
 
   switch (base) {
     case 'sofa2': case 'sofa3': case 'armchair': {
-      rrPath(g, -hw, -hd, w, d, 90); stroke();
-      const back = Math.min(200, d * 0.24), arm = base === 'armchair' ? Math.min(140, w * 0.16) : Math.min(160, w * 0.11);
+      rrPath(g, -hw, -hd, w, d, m * 0.10); stroke();
+      const back = d * 0.22;
+      const arm = base === 'armchair' ? w * 0.16 : w * 0.10;
       inner();
       g.beginPath();
-      g.moveTo(-hw + arm, -hd + back); g.lineTo(hw - arm, -hd + back);           // back line
-      g.moveTo(-hw + arm, -hd + back); g.lineTo(-hw + arm, hd - 40);             // arms
-      g.moveTo(hw - arm, -hd + back); g.lineTo(hw - arm, hd - 40);
+      g.moveTo(-hw + arm, -hd + back); g.lineTo(hw - arm, -hd + back);       // back line
+      g.moveTo(-hw + arm, -hd + back); g.lineTo(-hw + arm, hd - d * 0.05);   // arms
+      g.moveTo(hw - arm, -hd + back); g.lineTo(hw - arm, hd - d * 0.05);
       const n = base === 'sofa3' ? 3 : base === 'sofa2' ? 2 : 1;
       const seatW = (w - 2 * arm) / n;
       for (let i = 1; i < n; i++) {
-        g.moveTo(-hw + arm + i * seatW, -hd + back); g.lineTo(-hw + arm + i * seatW, hd - 60);
+        g.moveTo(-hw + arm + i * seatW, -hd + back);
+        g.lineTo(-hw + arm + i * seatW, hd - d * 0.07);
       }
       g.stroke();
       break;
     }
-    case 'sectional': {
+    case 'chaiseL': {                      // couch with a chaise on the left end
+      const bd = d * 0.58, cw = w * 0.34;  // body depth, chaise width
+      g.beginPath();
+      g.moveTo(-hw, -hd); g.lineTo(hw, -hd); g.lineTo(hw, -hd + bd);
+      g.lineTo(-hw + cw, -hd + bd); g.lineTo(-hw + cw, hd); g.lineTo(-hw, hd);
+      g.closePath(); stroke();
+      const back = d * 0.14, arm = w * 0.08;
+      inner();
+      g.beginPath();
+      g.moveTo(-hw + arm, -hd + back); g.lineTo(hw - arm, -hd + back);            // back line
+      g.moveTo(hw - arm, -hd + back); g.lineTo(hw - arm, -hd + bd - d * 0.03);    // right arm
+      g.moveTo(-hw + arm, -hd + back); g.lineTo(-hw + arm, hd - d * 0.03);        // left arm along chaise
+      g.moveTo(-hw + cw, -hd + back); g.lineTo(-hw + cw, -hd + bd - d * 0.03);    // chaise divider
+      const midX = (-hw + cw + hw - arm) / 2;
+      g.moveTo(midX, -hd + back); g.lineTo(midX, -hd + bd - d * 0.05);            // seat divider
+      g.stroke();
+      break;
+    }
+    case 'sectional': {                    // return corner on the left
       const barD = d * 0.45, barW = w * 0.38;
       g.beginPath();
       g.moveTo(-hw, -hd); g.lineTo(hw, -hd); g.lineTo(hw, -hd + barD);
@@ -710,50 +744,52 @@ function drawKind(g, kind, w, d, color, lw) {
       g.closePath(); stroke();
       inner();
       g.beginPath();
-      g.moveTo(-hw + 140, -hd + 140); g.lineTo(hw - 60, -hd + 140);      // back cushion line
-      g.moveTo(-hw + 140, -hd + 140); g.lineTo(-hw + 140, hd - 60);      // side cushion line
-      g.moveTo(-hw + barW, -hd + barD); g.lineTo(-hw + barW * 0.55, -hd + barD * 0.55);
+      g.moveTo(-hw + w * 0.05, -hd + d * 0.07); g.lineTo(hw - w * 0.02, -hd + d * 0.07);  // back cushion line
+      g.moveTo(-hw + w * 0.05, -hd + d * 0.07); g.lineTo(-hw + w * 0.05, hd - d * 0.02);  // side cushion line
+      g.moveTo(-hw + barW, -hd + barD); g.lineTo(-hw + barW * 0.55, -hd + barD * 0.55);   // corner seam
       g.stroke();
       break;
     }
-    case 'ottoman': rrPath(g, -hw, -hd, w, d, 100); stroke(); break;
+    case 'ottoman': rrPath(g, -hw, -hd, w, d, m * 0.15); stroke(); break;
     case 'coffee': case 'side': case 'console': case 'desk': case 'dinetable': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
-      inner(); const ins = Math.min(60, w * 0.08, d * 0.08);
+      inner(); const ins = m * 0.08;
       g.strokeRect(-hw + ins, -hd + ins, w - 2 * ins, d - 2 * ins);
       break;
     }
     case 'dineround': case 'gencircle': {
       g.beginPath(); g.ellipse(0, 0, hw, hd, 0, 0, Math.PI * 2); stroke();
       if (base === 'dineround') {
-        inner(); g.beginPath(); g.ellipse(0, 0, hw - 70, hd - 70, 0, 0, Math.PI * 2); g.stroke();
+        inner(); g.beginPath(); g.ellipse(0, 0, hw * 0.88, hd * 0.88, 0, 0, Math.PI * 2); g.stroke();
       }
       break;
     }
     case 'dinechair': {
-      rrPath(g, -hw, -hd + 60, w, d - 60, 70); stroke();
-      g.beginPath(); g.rect(-hw + 20, -hd, w - 40, 80); g.fill(); g.stroke();
+      rrPath(g, -hw, -hd + d * 0.12, w, d * 0.88, m * 0.15); stroke();
+      g.beginPath(); g.rect(-hw + w * 0.05, -hd, w * 0.9, d * 0.16); g.fill(); g.stroke();
       break;
     }
     case 'tv': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
       g.fillStyle = '#54565e';
-      g.fillRect(-w * 0.35, -hd + 30, w * 0.7, 70);      // the TV, on the back edge
+      g.fillRect(-w * 0.35, -hd + d * 0.07, w * 0.7, d * 0.16);   // the TV, on the back edge
       break;
     }
     case 'bookshelf': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
       inner(); g.beginPath();
-      const nDiv = Math.max(2, Math.round(w / 320));
+      const nDiv = Math.max(2, Math.round(w / 320));   // ~real-size compartments
       for (let i = 1; i < nDiv; i++) {
         const x = -hw + i * w / nDiv; g.moveTo(x, -hd); g.lineTo(x, hd);
       }
       g.stroke();
       break;
     }
-    case 'dresser': case 'nightstand': case 'console2': {
+    case 'dresser': case 'nightstand': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
-      inner(); g.beginPath(); g.moveTo(-hw + 40, 0); g.lineTo(hw - 40, 0); g.stroke();
+      inner(); g.beginPath();
+      g.moveTo(-hw + w * 0.05, 0); g.lineTo(hw - w * 0.05, 0);
+      g.stroke();
       break;
     }
     case 'wardrobe': {
@@ -765,33 +801,38 @@ function drawKind(g, kind, w, d, color, lw) {
       break;
     }
     case 'rugrect': {
-      rrPath(g, -hw, -hd, w, d, 60); stroke();
-      inner(); rrPath(g, -hw + 90, -hd + 90, w - 180, d - 180, 40); g.stroke();
+      rrPath(g, -hw, -hd, w, d, m * 0.04); stroke();
+      inner();
+      const ins = m * 0.07;
+      rrPath(g, -hw + ins, -hd + ins, w - 2 * ins, d - 2 * ins, m * 0.03);
+      g.stroke();
       break;
     }
     case 'ruground': {
       g.beginPath(); g.ellipse(0, 0, hw, hd, 0, 0, Math.PI * 2); stroke();
-      inner(); g.beginPath(); g.ellipse(0, 0, hw - 90, hd - 90, 0, 0, Math.PI * 2); g.stroke();
+      inner(); g.beginPath(); g.ellipse(0, 0, hw * 0.91, hd * 0.91, 0, 0, Math.PI * 2); g.stroke();
       break;
     }
     case 'bedtwin': case 'bedfull': case 'bedqueen': case 'bedking': {
       g.beginPath(); g.rect(-hw, -hd, w, d); stroke();
       inner();
       const single = base === 'bedtwin';
-      const pw = single ? w - 200 : (w - 260) / 2, ph = Math.min(260, d * 0.16);
-      if (single) { rrPath(g, -pw / 2, -hd + 70, pw, ph, 50); g.stroke(); }
+      const pm = w * 0.06, ph = d * 0.13;                       // pillow margin & height
+      const pw = single ? w - 2 * pm : (w - 3 * pm) / 2;
+      const py = -hd + d * 0.035, pr = Math.min(pw, ph) * 0.35;
+      if (single) { rrPath(g, -pw / 2, py, pw, ph, pr); g.stroke(); }
       else {
-        rrPath(g, -hw + 90, -hd + 70, pw, ph, 50); g.stroke();
-        rrPath(g, hw - 90 - pw, -hd + 70, pw, ph, 50); g.stroke();
+        rrPath(g, -hw + pm, py, pw, ph, pr); g.stroke();
+        rrPath(g, hw - pm - pw, py, pw, ph, pr); g.stroke();
       }
       g.beginPath();
-      g.moveTo(-hw, -hd + ph + 190); g.lineTo(hw, -hd + ph + 190);   // blanket line
+      g.moveTo(-hw, py + ph + d * 0.12); g.lineTo(hw, py + ph + d * 0.12);   // blanket line
       g.stroke();
       break;
     }
     case 'officechair': {
-      g.beginPath(); g.ellipse(0, 40, hw - 40, hd - 80, 0, 0, Math.PI * 2); stroke();
-      g.beginPath(); g.rect(-hw * 0.75, -hd, hw * 1.5, 110); g.fill(); g.stroke();
+      g.beginPath(); g.ellipse(0, d * 0.06, hw - w * 0.06, hd - d * 0.12, 0, 0, Math.PI * 2); stroke();
+      g.beginPath(); g.rect(-hw * 0.75, -hd, hw * 1.5, d * 0.17); g.fill(); g.stroke();
       break;
     }
     case 'plant': {
