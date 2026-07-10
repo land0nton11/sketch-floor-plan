@@ -35,9 +35,9 @@
   .tb-btn.on{background:var(--accent-soft); color:var(--accent); border-color:#bcd6f7;}
   .tb-sep{width:1px; height:22px; background:var(--border); margin:0 6px; flex:none;}
   .tb-group{display:flex; align-items:center; gap:2px;}
-  #unitsToggle{display:flex; border:1px solid var(--border); border-radius:6px; overflow:hidden;}
-  #unitsToggle button{padding:4px 10px;}
-  #unitsToggle button.on{background:var(--accent); color:#fff;}
+  #unitsToggle,#viewToggle{display:flex; border:1px solid var(--border); border-radius:6px; overflow:hidden;}
+  #unitsToggle button,#viewToggle button{padding:4px 10px;}
+  #unitsToggle button.on,#viewToggle button.on{background:var(--accent); color:#fff;}
   #zoomPct{min-width:52px; text-align:center; color:var(--muted);}
   #layoutName{color:var(--muted); margin-left:auto; padding:0 8px; overflow:hidden; text-overflow:ellipsis; max-width:220px;}
 
@@ -179,6 +179,11 @@
     <button id="btnMetric">m / cm</button>
   </div>
   <div class="tb-sep"></div>
+  <div id="viewToggle" title="View mode (press 3)">
+    <button id="btn2D">2D</button>
+    <button id="btn3D">3D</button>
+  </div>
+  <div class="tb-sep"></div>
   <div class="tb-group">
     <button class="tb-btn" id="btnGrid" title="Show / hide grid">Grid</button>
     <button class="tb-btn" id="btnSnap" title="Snap to grid (hold Alt to invert while dragging)">Snap</button>
@@ -200,7 +205,7 @@
     <div id="tools"></div>
     <div id="palette"></div>
     <div id="shortcuts">
-      <div><b>Pan</b>Space-drag / mid-drag</div>
+      <div><b>Pan</b>H tool / Space-drag / mid-drag</div>
       <div><b>Zoom</b>Mouse wheel</div>
       <div><b>Straight</b>Hold Shift (wall)</div>
       <div><b>Snap off</b>Hold Alt</div>
@@ -208,6 +213,7 @@
       <div><b>Duplicate</b>Ctrl+D</div>
       <div><b>Delete</b>Del / Backspace</div>
       <div><b>Add corner</b>Double-click wall</div>
+      <div><b>3D view</b>Press 3 to toggle</div>
     </div>
   </div>
   <div id="canvasWrap"><canvas id="cvs"></canvas></div>
@@ -258,18 +264,20 @@ function defaultState() {
     units: 'imperial',                       // 'imperial' | 'metric'
     grid: { spacing: 152.4, visible: true, snap: true },  // 6 in
     wallThickness: 114.3,                    // 4.5 in
+    wallHeight: 2438.4,                      // 8 ft — used by the 3D view
     showRulers: true,
     showDims: true,
     showOverlap: false,   // red outline on colliding furniture (opt-in)
     room: { vertices: [] },                  // [{x,y}] mm, closed polygon
-    openings: [],   // {id, type:'door'|'window', wall, offset(center, mm from wall start), width, hinge:'left'|'right', dir:'in'|'out'}
-    furniture: [],  // {id, kind, shape:'rect'|'circle', label, x, y, w, d, rot, color}  (array order = z-order)
+    openings: [],   // {id, type:'door'|'window', wall, offset(center, mm from wall start), width, hinge:'left'|'right', dir:'in'|'out', height?, sill?}
+    furniture: [],  // {id, kind, shape:'rect'|'circle', label, x, y, w, d, rot, color, h?}  (array order = z-order; h = 3D height, kind default if absent)
     customPalette: []  // {key, label, kind, shape, w, d, color}
   };
 }
 
 let state = defaultState();
 let view = { x: -3200, y: -2400, scale: 0.12 };   // world mm at canvas top-left, px per mm
+let viewMode = '2d';                              // '2d' (edit) | '3d' (orbit viewer)
 
 /* selection — kinds are mutually exclusive (furn may be multi) */
 let sel = { furn: [], opening: null, vertex: null, wall: null };
@@ -583,6 +591,7 @@ function loadLayoutByName(name) {
   state.name = name;
   clearSel(); cancelModes();
   zoomToFit();
+  cam3 = null;   // re-fit the 3D camera to the loaded layout
   commit();
   toast('Loaded “' + name + '”');
 }
@@ -662,6 +671,37 @@ for (const g of LIBRARY) for (const it of g.items) DEFS[it.key] = it;
 
 /* right-handed variants are a horizontal mirror of their base kind */
 const MIRROR_KINDS = { sectionalR: 'sectional', chaiseR: 'chaiseL' };
+
+/* default 3D heights (mm) per kind; used when a piece has no explicit h */
+const KIND_HEIGHT = {
+  sofa2: 820, sofa3: 820, chaiseL: 820, chaiseR: 820, sectional: 820, sectionalR: 820,
+  armchair: 850, ottoman: 430,
+  coffee: 430, side: 550, console: 800, desk: 740,
+  tv: 550, bookshelf: 1800, dresser: 900, wardrobe: 2000, nightstand: 600,
+  rugrect: 15, ruground: 15,
+  dinetable: 750, dineround: 750, dinechair: 880,
+  bedtwin: 550, bedfull: 550, bedqueen: 550, bedking: 550,
+  officechair: 950, plant: 1400, lamp: 1550,
+  genrect: 750, gencircle: 750, rect: 750, circle: 750,
+};
+const DEFAULT_FURN_H = 750, DEFAULT_DOOR_H = 2032, DEFAULT_WIN_SILL = 915, DEFAULT_WIN_H = 1220;
+
+function furnHeight(f) {
+  if (f.h > 0) return f.h;
+  let base = f.kind && f.kind.startsWith('custom:') ? f.kind.slice(7) : f.kind;
+  return KIND_HEIGHT[base] || DEFAULT_FURN_H;
+}
+
+/* vertical extent of an opening: {z0, z1} above the floor, clamped to the wall */
+function openingVert(o) {
+  const H = state.wallHeight || 2438.4;
+  if (o.type === 'window') {
+    const sill = clamp(o.sill != null ? o.sill : DEFAULT_WIN_SILL, 0, H - 200);
+    const top = clamp(sill + (o.height > 0 ? o.height : DEFAULT_WIN_H), sill + 100, H);
+    return { z0: sill, z1: top };
+  }
+  return { z0: 0, z1: clamp(o.height > 0 ? o.height : DEFAULT_DOOR_H, 500, H) };
+}
 
 /* rounded-rect path helper (mm coords, centered); safe for tiny/negative sizes */
 function rrPath(g, x, y, w, h, r) {
@@ -933,7 +973,8 @@ function render() {
   const dpr = window.devicePixelRatio || 1;
   try {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    renderScene(ctx, view, { w: CW, h: CH, grid: state.grid.visible, dims: state.showDims, ui: true });
+    if (viewMode === '3d') render3d(ctx, { w: CW, h: CH });
+    else renderScene(ctx, view, { w: CW, h: CH, grid: state.grid.visible, dims: state.showDims, ui: true });
   } catch (err) {
     // never leave the canvas frozen on a stale frame: hard-reset the context
     console.error('render failed:', err);
@@ -1645,6 +1686,7 @@ function placeFurnitureAt(def, p) {
     x: q.x, y: q.y, w: def.w, d: def.d, rot: 0,
     color: def.color,
   };
+  if (def.h > 0) f.h = def.h;
   state.furniture.push(f);
   selectFurn(f.id);
   setTool('select');
@@ -1654,6 +1696,7 @@ function placeFurnitureAt(def, p) {
 /* ---------------- tools ---------------- */
 const TOOL_HINTS = {
   select: 'Click to select · drag to move · double-click a wall to add a corner · marquee-drag to multi-select',
+  pan: 'Drag to pan · mouse wheel zooms · V returns to Select',
   wall: 'Click to place corners · Shift = straight · click first corner or press Enter to close · Esc cancels',
   door: 'Click on a wall to place a door',
   window: 'Click on a wall to place a window',
@@ -1662,13 +1705,20 @@ const TOOL_HINTS = {
   measure: 'Drag (or click two points) to measure · Esc clears',
 };
 
+/* idle cursor for the current mode/tool */
+function idleCursor() {
+  if (viewMode === '3d' || tool === 'pan') return 'grab';
+  return tool === 'select' ? 'default' : 'crosshair';
+}
+
 function setTool(t) {
+  if (viewMode === '3d') setViewMode('2d');
   cancelModes();
   tool = t;
   if (t !== 'select') clearSel();
   document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
   $('statusHint').textContent = TOOL_HINTS[t] || '';
-  cvs.style.cursor = t === 'select' ? 'default' : 'crosshair';
+  cvs.style.cursor = idleCursor();
   commit(false);
 }
 
@@ -1682,18 +1732,20 @@ cvs.addEventListener('contextmenu', e => e.preventDefault());
 
 cvs.addEventListener('wheel', e => {
   e.preventDefault();
+  if (viewMode === '3d') { dolly3d(Math.exp(e.deltaY * 0.0012)); return; }
   const sp = evtScreen(e);
   zoomAt(sp.x, sp.y, Math.exp(-e.deltaY * 0.0016));
 }, { passive: false });
 
 cvs.addEventListener('pointerdown', e => {
+  if (viewMode === '3d') { pointerDown3d(e); return; }
   cvs.setPointerCapture(e.pointerId);
   const sp = evtScreen(e);
   const wp = S2W(sp);
   pointerScreen = sp; pointerWorld = wp;
 
-  // pan: middle button, right button, or space+left
-  if (e.button === 1 || e.button === 2 || (e.button === 0 && spaceDown)) {
+  // pan: middle button, right button, space+left, or the pan tool
+  if (e.button === 1 || e.button === 2 || (e.button === 0 && (spaceDown || tool === 'pan'))) {
     dragState = { mode: 'pan', startScreen: sp, startView: { x: view.x, y: view.y } };
     cvs.style.cursor = 'grabbing';
     return;
@@ -1822,6 +1874,7 @@ cvs.addEventListener('pointerdown', e => {
 });
 
 cvs.addEventListener('pointermove', e => {
+  if (viewMode === '3d') { pointerMove3d(e); return; }
   const sp = evtScreen(e);
   let wp = S2W(sp);
   pointerScreen = sp;
@@ -1942,9 +1995,14 @@ cvs.addEventListener('pointerup', e => {
   const ds = dragState;
   dragState = null;
 
+  if (ds.mode === 'orbit3d' || ds.mode === 'pan3d') {
+    cvs.style.cursor = 'grab';
+    return;
+  }
+
   switch (ds.mode) {
     case 'pan':
-      cvs.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+      cvs.style.cursor = idleCursor();
       scheduleAutosave();
       break;
     case 'moveFurn': case 'rotate': case 'resize': case 'vertex': case 'opening':
@@ -1995,6 +2053,7 @@ cvs.addEventListener('pointerup', e => {
 });
 
 cvs.addEventListener('dblclick', e => {
+  if (viewMode === '3d') { fitCam3d(); render(); return; }
   if (tool !== 'select') return;
   const wp = S2W(evtScreen(e));
   if (hitFurniture(wp) || hitVertex(wp) !== null || hitOpening(wp)) return;
@@ -2029,8 +2088,17 @@ window.addEventListener('keydown', e => {
   if (mod && k === 'e') { e.preventDefault(); showPngModal(); return; }
   if (mod) return;
 
+  if (k === '3') { setViewMode(viewMode === '3d' ? '2d' : '3d'); return; }
+  if (viewMode === '3d') {
+    const tk = { v: 'select', h: 'pan', w: 'wall', d: 'door', n: 'window', r: 'rect', c: 'circle', m: 'measure' }[k];
+    if (tk) { setViewMode('2d'); setTool(tk); }
+    else if (k === 'escape') setViewMode('2d');
+    return;
+  }
+
   switch (k) {
     case 'v': setTool('select'); break;
+    case 'h': setTool('pan'); break;
     case 'w': setTool('wall'); break;
     case 'd': setTool('door'); break;
     case 'n': setTool('window'); break;
@@ -2061,7 +2129,7 @@ window.addEventListener('keyup', e => {
   if (e.key === 'Alt') altDown = false;
   if (e.key === ' ') {
     spaceDown = false;
-    if (!dragState) cvs.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+    if (!dragState) cvs.style.cursor = idleCursor();
   }
 });
 
@@ -2113,7 +2181,9 @@ function updateToolbar() {
   $('btnDims').classList.toggle('on', state.showDims);
   $('btnImperial').classList.toggle('on', state.units === 'imperial');
   $('btnMetric').classList.toggle('on', state.units === 'metric');
-  $('zoomPct').textContent = Math.round(view.scale / BASE_SCALE * 100) + '%';
+  $('btn2D').classList.toggle('on', viewMode === '2d');
+  $('btn3D').classList.toggle('on', viewMode === '3d');
+  $('zoomPct').textContent = viewMode === '3d' ? '3D' : Math.round(view.scale / BASE_SCALE * 100) + '%';
   $('btnUndo').disabled = !histUndo.length;
   $('btnRedo').disabled = !histRedo.length;
   $('layoutName').textContent = state.name;
@@ -2132,14 +2202,19 @@ function wireToolbar() {
   $('btnRedo').onclick = redo;
   $('btnImperial').onclick = () => setUnits('imperial');
   $('btnMetric').onclick = () => setUnits('metric');
+  $('btn2D').onclick = () => setViewMode('2d');
+  $('btn3D').onclick = () => setViewMode('3d');
   $('btnGrid').onclick = () => { state.grid.visible = !state.grid.visible; commit(); };
   $('btnSnap').onclick = () => { state.grid.snap = !state.grid.snap; commit(); };
   $('btnRulers').onclick = () => { state.showRulers = !state.showRulers; commit(); };
   $('btnDims').onclick = () => { state.showDims = !state.showDims; commit(); };
-  $('btnZoomIn').onclick = () => zoomAt(CW / 2, CH / 2, 1.25);
-  $('btnZoomOut').onclick = () => zoomAt(CW / 2, CH / 2, 0.8);
-  $('zoomPct').onclick = () => zoomAt(CW / 2, CH / 2, BASE_SCALE / view.scale);
-  $('btnZoomFit').onclick = () => { zoomToFit(); render(); updateToolbar(); scheduleAutosave(); };
+  $('btnZoomIn').onclick = () => viewMode === '3d' ? dolly3d(0.8) : zoomAt(CW / 2, CH / 2, 1.25);
+  $('btnZoomOut').onclick = () => viewMode === '3d' ? dolly3d(1.25) : zoomAt(CW / 2, CH / 2, 0.8);
+  $('zoomPct').onclick = () => { if (viewMode === '3d') { fitCam3d(); render(); } else zoomAt(CW / 2, CH / 2, BASE_SCALE / view.scale); };
+  $('btnZoomFit').onclick = () => {
+    if (viewMode === '3d') { fitCam3d(); render(); return; }
+    zoomToFit(); render(); updateToolbar(); scheduleAutosave();
+  };
   $('fileInput').addEventListener('change', importJsonFile);
 }
 
@@ -2153,6 +2228,7 @@ function setUnits(u) {
 /* ---------------- tools & palette ---------------- */
 const TOOLS = [
   { id: 'select', label: 'Select', key: 'V' },
+  { id: 'pan', label: 'Pan', key: 'H' },
   { id: 'wall', label: 'Wall', key: 'W' },
   { id: 'door', label: 'Door', key: 'D' },
   { id: 'window', label: 'Window', key: 'N' },
@@ -2193,6 +2269,7 @@ function paletteIcon(def) {
 }
 
 function armPlacing(def, elItem) {
+  if (viewMode === '3d') setViewMode('2d');
   cancelModes();
   if (tool !== 'select') setTool('select');
   placing = { def, ghost: null, onCanvas: false };
@@ -2357,6 +2434,10 @@ function propsRoom(p) {
   p.append(propRow('Wall thickness', lenInput(state.wallThickness, v => {
     pushHistory(); state.wallThickness = clamp(v, 20, 600); commit();
   })));
+  p.append(propRow('Wall height', lenInput(state.wallHeight || 2438.4, v => {
+    pushHistory(); state.wallHeight = clamp(v, 1000, 6000); commit();
+  })));
+  p.append(el('div', { class: 'prop-note', text: 'Wall height is used by the 3D view (press 3 or use the 2D/3D toggle).' }));
   p.append(propRow('Grid spacing', lenInput(state.grid.spacing, v => {
     state.grid.spacing = clamp(v, 10, 5000); commit();
   })));
@@ -2386,6 +2467,7 @@ function propsFurniture(p, f) {
 
   p.append(propRow('Width', lenInput(f.w, v => { pushHistory(); f.w = clamp(v, 50, 20000); commit(); })));
   p.append(propRow('Depth', lenInput(f.d, v => { pushHistory(); f.d = clamp(v, 50, 20000); commit(); })));
+  p.append(propRow('Height (3D)', lenInput(furnHeight(f), v => { pushHistory(); f.h = clamp(v, 10, 6000); commit(); })));
   p.append(propRow('X', lenInput(f.x, v => { pushHistory(); f.x = v; commit(); }, true)));
   p.append(propRow('Y', lenInput(f.y, v => { pushHistory(); f.y = v; commit(); }, true)));
 
@@ -2410,7 +2492,7 @@ function propsFurniture(p, f) {
       if (!name) return;
       state.customPalette.push({
         key: 'cp_' + uid(), label: name, kind: f.kind, shape: f.shape,
-        w: f.w, d: f.d, color: f.color,
+        w: f.w, d: f.d, h: furnHeight(f), color: f.color,
       });
       buildPalette(); commit();
       toast('Added “' + name + '” to My items');
@@ -2450,6 +2532,14 @@ function propsOpening(p, o) {
   p.append(propRow('From wall start', lenInput(o.offset, v => {
     pushHistory(); o.offset = v; commit();   // commit() clamps via clampOpenings
   })));
+  p.append(propRow('Height (3D)', lenInput(o.height > 0 ? o.height : (o.type === 'door' ? DEFAULT_DOOR_H : DEFAULT_WIN_H), v => {
+    pushHistory(); o.height = clamp(v, 100, 6000); commit();
+  })));
+  if (o.type === 'window') {
+    p.append(propRow('Sill height', lenInput(o.sill != null ? o.sill : DEFAULT_WIN_SILL, v => {
+      pushHistory(); o.sill = clamp(v, 0, 5000); commit();
+    })));
+  }
   p.append(statRow('On wall', '#' + (o.wall + 1) + ' (' + fmtLen(wallLen(o.wall)) + ')'));
 
   if (o.type === 'door') {
@@ -2502,6 +2592,7 @@ function doNew() {
   state.units = keepUnits;
   clearSel(); cancelModes();
   view = { x: -CW / 2 / 0.12, y: -CH / 2 / 0.12, scale: 0.12 };
+  cam3 = null;
   buildPalette();
   commit();
   toast('New layout — Ctrl+Z brings the previous one back');
@@ -2579,6 +2670,7 @@ function importJsonFile(e) {
       for (const it of keepPalette) if (!keys.has(it.key)) state.customPalette.push(it);
       clearSel(); cancelModes();
       zoomToFit();
+      cam3 = null;
       buildPalette();
       commit();
       toast('Imported “' + state.name + '”');
@@ -2591,6 +2683,7 @@ function importJsonFile(e) {
 
 /* ---------------- PNG export ---------------- */
 function showPngModal() {
+  if (viewMode === '3d') { exportPng3d(); return; }   // snapshot of the current 3D view
   const body = openModal('Export PNG image');
 
   const modeSel = el('select', {},
@@ -2652,6 +2745,333 @@ function exportPng(opts) {
     a.click();
     URL.revokeObjectURL(a.href);
     toast('PNG downloaded');
+  });
+}
+
+/* ================================================================
+   3D view — self-contained software renderer on Canvas 2D (no
+   libraries, keeps the app offline/single-file). Geometry is built
+   from the same state the 2D editor uses: walls extruded to
+   state.wallHeight with real door/window cutouts, furniture as
+   prisms of its footprint × height. Faces are flat-shaded,
+   back-face culled, near-plane clipped and painter-sorted.
+   Coordinates: plan x/y (mm) + z up, converted to a right-handed
+   "math" frame (y negated) for the camera so nothing mirrors.
+   ================================================================ */
+let cam3 = null;   // {yaw, pitch, dist, tx, ty} — orbit camera around (tx, ty) on the floor
+const CAM3_FOV = rad(50), CAM3_NEAR = 60;
+const PITCH_MIN = rad(8), PITCH_MAX = rad(84);
+const DIST_MIN = 1500, DIST_MAX = 150000;
+
+const v3 = (x, y, z) => ({ x, y, z });
+const add3 = (a, b) => v3(a.x + b.x, a.y + b.y, a.z + b.z);
+const sub3 = (a, b) => v3(a.x - b.x, a.y - b.y, a.z - b.z);
+const mul3 = (a, k) => v3(a.x * k, a.y * k, a.z * k);
+const dot3 = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+const cross3 = (a, b) => v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+const norm3 = a => { const l = Math.hypot(a.x, a.y, a.z) || 1; return v3(a.x / l, a.y / l, a.z / l); };
+
+/* plan (x, y, z-up) → right-handed math coords (plan y grows south) */
+const M3 = (x, y, z) => v3(x, -y, z);
+
+const LIGHT3 = norm3(v3(0.35, 0.45, 0.85));
+const COL3 = { wall: '#e9e5dc', floor: '#f8f4ea', glass: '#b9d7e6' };
+
+function fitCam3d() {
+  const b = contentBounds();
+  const cx = b ? (b.minX + b.maxX) / 2 : 0;
+  const cy = b ? (b.minY + b.maxY) / 2 : 0;
+  const span = b ? Math.max(b.maxX - b.minX, b.maxY - b.minY, 3000) : 6000;
+  cam3 = { yaw: -Math.PI / 2 - 0.5, pitch: rad(42), dist: clamp(span * 1.9, DIST_MIN, DIST_MAX), tx: cx, ty: cy };
+}
+
+function cam3Basis(vpW, vpH) {
+  const c = cam3;
+  const target = M3(c.tx, c.ty, (state.wallHeight || 2438.4) * 0.3);
+  const eye = add3(target, v3(
+    c.dist * Math.cos(c.pitch) * Math.cos(c.yaw),
+    c.dist * Math.cos(c.pitch) * Math.sin(c.yaw),
+    c.dist * Math.sin(c.pitch)));
+  const fwd = norm3(sub3(target, eye));
+  const right = norm3(cross3(fwd, v3(0, 0, 1)));
+  const up = cross3(right, fwd);
+  const fl = (vpH / 2) / Math.tan(CAM3_FOV / 2);
+  return { eye, fwd, right, up, fl, cx: vpW / 2, cy: vpH / 2 };
+}
+
+const toCam3 = (p, B) => {
+  const d = sub3(p, B.eye);
+  return v3(dot3(d, B.right), dot3(d, B.up), dot3(d, B.fwd));
+};
+
+/* Sutherland–Hodgman clip of a camera-space polygon against z > near */
+function clipNear3(cp, near) {
+  const out = [];
+  for (let i = 0; i < cp.length; i++) {
+    const a = cp[i], b = cp[(i + 1) % cp.length];
+    const ain = a.z > near, bin = b.z > near;
+    if (ain) out.push(a);
+    if (ain !== bin) {
+      const t = (near - a.z) / (b.z - a.z);
+      out.push(v3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, near));
+    }
+  }
+  return out;
+}
+
+function newell3(pts) {
+  let x = 0, y = 0, z = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    x += (a.y - b.y) * (a.z + b.z);
+    y += (a.z - b.z) * (a.x + b.x);
+    z += (a.x - b.x) * (a.y + b.y);
+  }
+  return v3(x, y, z);
+}
+
+function centroid3(pts) {
+  let c = v3(0, 0, 0);
+  for (const p of pts) c = add3(c, p);
+  return mul3(c, 1 / pts.length);
+}
+
+/* multiply a #rrggbb / #rgb color by k (flat shading) */
+function shadeHex(hex, k) {
+  let h = String(hex).replace('#', '');
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  if (isNaN(r + g + b)) return hex;
+  const f = v => clamp(Math.round(v * k), 0, 255);
+  return 'rgb(' + f(r) + ',' + f(g) + ',' + f(b) + ')';
+}
+
+/* add one face of a convex solid; normal is oriented away from solidC */
+function addSolidFace(faces, pts, solidC, color, opts) {
+  let n = newell3(pts);
+  if (Math.hypot(n.x, n.y, n.z) < 1e-6) return;
+  n = norm3(n);
+  const c = centroid3(pts);
+  if (dot3(n, sub3(c, solidC)) < 0) n = mul3(n, -1);
+  const k = 0.58 + 0.42 * Math.max(0, dot3(n, LIGHT3));
+  faces.push({
+    pts, n, c,
+    fill: shadeHex(color, k),
+    alpha: opts && opts.alpha != null ? opts.alpha : 1,
+    noCull: !!(opts && opts.noCull),
+  });
+}
+
+/* extrude a plan-space polygon from z0 to z1 */
+function prism3d(faces, basePlan, z0, z1, color, opts) {
+  const n = basePlan.length;
+  let cx = 0, cy = 0;
+  for (const p of basePlan) { cx += p.x; cy += p.y; }
+  const solidC = M3(cx / n, cy / n, (z0 + z1) / 2);
+  const bot = basePlan.map(p => M3(p.x, p.y, z0));
+  const top = basePlan.map(p => M3(p.x, p.y, z1));
+  for (let i = 0; i < n; i++) {
+    addSolidFace(faces, [bot[i], bot[(i + 1) % n], top[(i + 1) % n], top[i]], solidC, color, opts);
+  }
+  addSolidFace(faces, top, solidC, color, opts);
+  if (z0 > 1) addSolidFace(faces, bot, solidC, color, opts);   // underside of lintels/window heads
+}
+
+/* footprint polygon of a furniture item (circle ≈ 20-gon) */
+function footprint3d(f) {
+  if (f.shape === 'circle') {
+    const pts = [], seg = 20, a0 = rad(f.rot);
+    for (let i = 0; i < seg; i++) {
+      const a = i / seg * Math.PI * 2;
+      pts.push(add(rot({ x: Math.cos(a) * f.w / 2, y: Math.sin(a) * f.d / 2 }, a0), f));
+    }
+    return pts;
+  }
+  return furnCorners(f);
+}
+
+/* one wall segment: solid boxes split around openings, plus window glass.
+   Walls between the camera and the room are ghosted so the interior reads. */
+function wallFaces3d(faces, i, eyePlan) {
+  const H = state.wallHeight || 2438.4, t = state.wallThickness;
+  const s = wallSeg(i), u = wallDir(i), nrm = perp(u), L = wallLen(i);
+  const mid = mul(add(s.a, s.b), 0.5);
+  const outward = mul(nrm, -interiorSign(i));
+  const ghost = (eyePlan.x - mid.x) * outward.x + (eyePlan.y - mid.y) * outward.y > 0 ? 0.16 : 1;
+  const opts = { alpha: ghost };
+  const boxBase = (s0, s1) => {
+    const q = (k, e) => add(add(s.a, mul(u, k)), mul(nrm, e));
+    return [q(s0, -t / 2), q(s1, -t / 2), q(s1, t / 2), q(s0, t / 2)];
+  };
+  const spans = state.openings.filter(o => o.wall === i)
+    .map(o => ({ s0: clamp(o.offset - o.width / 2, 0, L), s1: clamp(o.offset + o.width / 2, 0, L), o }))
+    .sort((a, b) => a.s0 - b.s0);
+  let cur = 0;
+  for (const sp of spans) {
+    const s0 = Math.max(sp.s0, cur), s1 = Math.max(sp.s1, cur);
+    if (s0 > cur + 1) prism3d(faces, boxBase(cur, s0), 0, H, COL3.wall, opts);
+    if (s1 > s0 + 1) {
+      const vz = openingVert(sp.o);
+      if (vz.z1 < H - 1) prism3d(faces, boxBase(s0, s1), vz.z1, H, COL3.wall, opts);   // header above
+      if (vz.z0 > 1) prism3d(faces, boxBase(s0, s1), 0, vz.z0, COL3.wall, opts);       // below the sill
+      if (sp.o.type === 'window') {
+        const a0 = add(s.a, mul(u, s0)), a1 = add(s.a, mul(u, s1));
+        const pts = [M3(a0.x, a0.y, vz.z0), M3(a1.x, a1.y, vz.z0), M3(a1.x, a1.y, vz.z1), M3(a0.x, a0.y, vz.z1)];
+        faces.push({ pts, n: norm3(newell3(pts)), c: centroid3(pts), fill: COL3.glass, alpha: 0.32 * ghost, noCull: true });
+      }
+    }
+    cur = Math.max(cur, s1);
+  }
+  if (cur < L - 1) prism3d(faces, boxBase(cur, L), 0, H, COL3.wall, opts);
+}
+
+function build3dFaces(eyePlan) {
+  const faces = [];
+  for (const f of state.furniture) prism3d(faces, footprint3d(f), 0, furnHeight(f), f.color);
+  if (roomClosed()) for (let i = 0; i < wallCount(); i++) wallFaces3d(faces, i, eyePlan);
+  return faces;
+}
+
+function render3d(g, opts) {
+  const W = opts.w, H = opts.h;
+  if (!cam3) fitCam3d();
+
+  const grad = g.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#eef1f4');
+  grad.addColorStop(1, '#dee2e7');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, W, H);
+
+  const B = cam3Basis(W, H);
+  const eyePlan = { x: B.eye.x, y: -B.eye.y };
+
+  const projectFace = ptsMath => {
+    const cp = clipNear3(ptsMath.map(p => toCam3(p, B)), CAM3_NEAR);
+    if (cp.length < 3) return null;
+    let depth = 0;
+    const pts2 = cp.map(p => {
+      depth += p.z;
+      return { x: B.cx + B.fl * p.x / p.z, y: B.cy - B.fl * p.y / p.z };
+    });
+    return { pts2, depth: depth / cp.length };
+  };
+  const fillPath = pts2 => {
+    g.beginPath();
+    g.moveTo(pts2[0].x, pts2[0].y);
+    for (let i = 1; i < pts2.length; i++) g.lineTo(pts2[i].x, pts2[i].y);
+    g.closePath();
+  };
+
+  // floor first: camera and all geometry sit above z = 0, so nothing is ever behind it
+  if (roomClosed()) {
+    const fl = projectFace(state.room.vertices.map(v => M3(v.x, v.y, 0)));
+    if (fl) {
+      fillPath(fl.pts2);
+      g.fillStyle = COL3.floor;
+      g.fill();
+      g.strokeStyle = 'rgba(120,116,104,.6)';
+      g.lineWidth = 1.4;
+      g.stroke();
+    }
+  }
+
+  const drawn = [];
+  for (const f of build3dFaces(eyePlan)) {
+    if (!f.noCull && dot3(f.n, sub3(B.eye, f.c)) <= 0) continue;   // back-face cull
+    const pr = projectFace(f.pts);
+    if (pr) drawn.push({ pr, f });
+  }
+  drawn.sort((a, b) => b.pr.depth - a.pr.depth);   // painter: far → near
+  g.lineJoin = 'round';
+  for (const d of drawn) {
+    g.globalAlpha = d.f.alpha;
+    fillPath(d.pr.pts2);
+    g.fillStyle = d.f.fill;
+    g.fill();
+    g.strokeStyle = 'rgba(55,57,64,.35)';
+    g.lineWidth = 1;
+    g.stroke();
+  }
+  g.globalAlpha = 1;
+
+  if (!roomClosed() && !state.furniture.length) {
+    g.fillStyle = '#8d8f97';
+    g.font = '15px system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.fillText('Nothing to show yet — switch to 2D and draw a room first.', W / 2, H / 2);
+  }
+}
+
+/* ---- 3D interaction: orbit / pan / dolly ---- */
+function setViewMode(m) {
+  if (viewMode === m) return;
+  viewMode = m;
+  cancelModes();
+  clearSel();
+  if (m === '3d') {
+    if (!cam3) fitCam3d();
+    cvs.style.cursor = 'grab';
+    $('statusHint').textContent =
+      'Drag to orbit · wheel to zoom · right/middle-drag to pan · double-click or Fit to re-center · 3 / Esc back to 2D';
+  } else {
+    cvs.style.cursor = idleCursor();
+    $('statusHint').textContent = TOOL_HINTS[tool] || '';
+  }
+  commit(false);
+}
+
+function dolly3d(f) {
+  cam3.dist = clamp(cam3.dist * f, DIST_MIN, DIST_MAX);
+  render();
+}
+
+/* where a screen ray hits the floor plane (plan coords), or null if looking level/up */
+function groundPoint3d(sx, sy, B) {
+  const dir = norm3(add3(B.fwd, add3(mul3(B.right, (sx - B.cx) / B.fl), mul3(B.up, (B.cy - sy) / B.fl))));
+  if (dir.z > -1e-4) return null;
+  const p = add3(B.eye, mul3(dir, -B.eye.z / dir.z));
+  return { x: p.x, y: -p.y };
+}
+
+function pointerDown3d(e) {
+  cvs.setPointerCapture(e.pointerId);
+  const sp = evtScreen(e);
+  if (e.button === 1 || e.button === 2 || (e.button === 0 && spaceDown)) {
+    dragState = { mode: 'pan3d', start: groundPoint3d(sp.x, sp.y, cam3Basis(CW, CH)) };
+  } else if (e.button === 0) {
+    dragState = { mode: 'orbit3d', startScreen: sp, yaw0: cam3.yaw, pitch0: cam3.pitch };
+  }
+  if (dragState) cvs.style.cursor = 'grabbing';
+}
+
+function pointerMove3d(e) {
+  const sp = evtScreen(e);
+  pointerScreen = sp;
+  if (!dragState) return;
+  if (dragState.mode === 'orbit3d') {
+    cam3.yaw = dragState.yaw0 - (sp.x - dragState.startScreen.x) * 0.006;
+    cam3.pitch = clamp(dragState.pitch0 + (sp.y - dragState.startScreen.y) * 0.006, PITCH_MIN, PITCH_MAX);
+    render();
+  } else if (dragState.mode === 'pan3d' && dragState.start) {
+    const cur = groundPoint3d(sp.x, sp.y, cam3Basis(CW, CH));
+    if (cur) {
+      cam3.tx += dragState.start.x - cur.x;
+      cam3.ty += dragState.start.y - cur.y;
+      render();
+    }
+  }
+}
+
+function exportPng3d() {
+  const k = 2;   // 2× for crispness
+  const oc = document.createElement('canvas');
+  oc.width = CW * k; oc.height = CH * k;
+  render3d(oc.getContext('2d'), { w: CW * k, h: CH * k });
+  oc.toBlob(blob => {
+    const a = el('a', { href: URL.createObjectURL(blob), download: (state.name || 'layout') + '-3D.png' });
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('3D view PNG downloaded');
   });
 }
 
