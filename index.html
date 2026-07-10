@@ -205,7 +205,7 @@
     <div id="tools"></div>
     <div id="palette"></div>
     <div id="shortcuts">
-      <div><b>Pan</b>Space-drag / mid-drag</div>
+      <div><b>Pan</b>H tool / Space-drag / mid-drag</div>
       <div><b>Zoom</b>Mouse wheel</div>
       <div><b>Straight</b>Hold Shift (wall)</div>
       <div><b>Snap off</b>Hold Alt</div>
@@ -1696,6 +1696,7 @@ function placeFurnitureAt(def, p) {
 /* ---------------- tools ---------------- */
 const TOOL_HINTS = {
   select: 'Click to select · drag to move · double-click a wall to add a corner · marquee-drag to multi-select',
+  pan: 'Drag to pan · mouse wheel zooms · V returns to Select',
   wall: 'Click to place corners · Shift = straight · click first corner or press Enter to close · Esc cancels',
   door: 'Click on a wall to place a door',
   window: 'Click on a wall to place a window',
@@ -1704,6 +1705,12 @@ const TOOL_HINTS = {
   measure: 'Drag (or click two points) to measure · Esc clears',
 };
 
+/* idle cursor for the current mode/tool */
+function idleCursor() {
+  if (viewMode === '3d' || tool === 'pan') return 'grab';
+  return tool === 'select' ? 'default' : 'crosshair';
+}
+
 function setTool(t) {
   if (viewMode === '3d') setViewMode('2d');
   cancelModes();
@@ -1711,7 +1718,7 @@ function setTool(t) {
   if (t !== 'select') clearSel();
   document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
   $('statusHint').textContent = TOOL_HINTS[t] || '';
-  cvs.style.cursor = t === 'select' ? 'default' : 'crosshair';
+  cvs.style.cursor = idleCursor();
   commit(false);
 }
 
@@ -1737,8 +1744,8 @@ cvs.addEventListener('pointerdown', e => {
   const wp = S2W(sp);
   pointerScreen = sp; pointerWorld = wp;
 
-  // pan: middle button, right button, or space+left
-  if (e.button === 1 || e.button === 2 || (e.button === 0 && spaceDown)) {
+  // pan: middle button, right button, space+left, or the pan tool
+  if (e.button === 1 || e.button === 2 || (e.button === 0 && (spaceDown || tool === 'pan'))) {
     dragState = { mode: 'pan', startScreen: sp, startView: { x: view.x, y: view.y } };
     cvs.style.cursor = 'grabbing';
     return;
@@ -1995,7 +2002,7 @@ cvs.addEventListener('pointerup', e => {
 
   switch (ds.mode) {
     case 'pan':
-      cvs.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+      cvs.style.cursor = idleCursor();
       scheduleAutosave();
       break;
     case 'moveFurn': case 'rotate': case 'resize': case 'vertex': case 'opening':
@@ -2083,7 +2090,7 @@ window.addEventListener('keydown', e => {
 
   if (k === '3') { setViewMode(viewMode === '3d' ? '2d' : '3d'); return; }
   if (viewMode === '3d') {
-    const tk = { v: 'select', w: 'wall', d: 'door', n: 'window', r: 'rect', c: 'circle', m: 'measure' }[k];
+    const tk = { v: 'select', h: 'pan', w: 'wall', d: 'door', n: 'window', r: 'rect', c: 'circle', m: 'measure' }[k];
     if (tk) { setViewMode('2d'); setTool(tk); }
     else if (k === 'escape') setViewMode('2d');
     return;
@@ -2091,6 +2098,7 @@ window.addEventListener('keydown', e => {
 
   switch (k) {
     case 'v': setTool('select'); break;
+    case 'h': setTool('pan'); break;
     case 'w': setTool('wall'); break;
     case 'd': setTool('door'); break;
     case 'n': setTool('window'); break;
@@ -2121,7 +2129,7 @@ window.addEventListener('keyup', e => {
   if (e.key === 'Alt') altDown = false;
   if (e.key === ' ') {
     spaceDown = false;
-    if (!dragState) cvs.style.cursor = viewMode === '3d' ? 'grab' : (tool === 'select' ? 'default' : 'crosshair');
+    if (!dragState) cvs.style.cursor = idleCursor();
   }
 });
 
@@ -2220,6 +2228,7 @@ function setUnits(u) {
 /* ---------------- tools & palette ---------------- */
 const TOOLS = [
   { id: 'select', label: 'Select', key: 'V' },
+  { id: 'pan', label: 'Pan', key: 'H' },
   { id: 'wall', label: 'Wall', key: 'W' },
   { id: 'door', label: 'Door', key: 'D' },
   { id: 'window', label: 'Window', key: 'N' },
@@ -3005,7 +3014,7 @@ function setViewMode(m) {
     $('statusHint').textContent =
       'Drag to orbit · wheel to zoom · right/middle-drag to pan · double-click or Fit to re-center · 3 / Esc back to 2D';
   } else {
-    cvs.style.cursor = tool === 'select' ? 'default' : 'crosshair';
+    cvs.style.cursor = idleCursor();
     $('statusHint').textContent = TOOL_HINTS[tool] || '';
   }
   commit(false);

@@ -58,14 +58,14 @@ python3 -m http.server 8000     # then visit http://localhost:8000
 
 | Key | Action |
 | --- | --- |
-| `V` `W` `D` `N` `R` `C` `M` | Select · Wall · Door · Window · Box · Circle · Measure |
+| `V` `H` `W` `D` `N` `R` `C` `M` | Select · Pan · Wall · Door · Window · Box · Circle · Measure |
 | `3` | Toggle 2D / 3D view |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo |
 | `Ctrl+D` | Duplicate selection |
 | `Ctrl+S` / `Ctrl+E` | Save layout / export PNG |
 | `Del` / `Backspace` | Delete selection |
 | Arrows (+`Shift`) | Nudge selection (larger step) |
-| `Space`-drag / middle-drag | Pan |
+| `Space`-drag / middle-drag / `H` tool | Pan |
 | Mouse wheel | Zoom at cursor |
 | `Shift` | Constrain wall angle / movement axis / aspect ratio; 15° rotation steps |
 | `Alt` | Momentarily invert snap |
