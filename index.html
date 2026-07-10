@@ -189,6 +189,7 @@
     <button class="tb-btn" id="btnSnap" title="Snap to grid (hold Alt to invert while dragging)">Snap</button>
     <button class="tb-btn" id="btnRulers" title="Show / hide rulers">Rulers</button>
     <button class="tb-btn" id="btnDims" title="Show / hide wall dimensions">Dims</button>
+    <button class="tb-btn" id="btnSizes" title="Show / hide size tags on selected shapes">Sizes</button>
   </div>
   <div class="tb-sep"></div>
   <div class="tb-group">
@@ -267,6 +268,7 @@ function defaultState() {
     wallHeight: 2438.4,                      // 8 ft — used by the 3D view
     showRulers: true,
     showDims: true,
+    showFurnDims: true,   // width/depth tags on selected shapes
     showOverlap: false,   // red outline on colliding furniture (opt-in)
     room: { vertices: [] },                  // [{x,y}] mm, closed polygon
     openings: [],   // {id, type:'door'|'window', wall, offset(center, mm from wall start), width, hinge:'left'|'right', dir:'in'|'out', height?, sill?}
@@ -1259,6 +1261,14 @@ function drawUIOverlays(g, vw, opts) {
       g.fill(); g.stroke();
     }
     g.restore();
+    // width/depth tags beside the shape (screen-aligned, so drawn outside the rotated frame)
+    if (state.showFurnDims !== false) {
+      const a = rad(f.rot);
+      const wAt = add(cs, rot({ x: 0, y: f.d / 2 * sc + 20 }, a));   // off the bottom edge
+      const dAt = add(cs, rot({ x: f.w / 2 * sc + 20, y: 0 }, a));   // off the right edge
+      drawTag(g, wAt.x, wAt.y, fmtLen(f.w));
+      drawTag(g, dAt.x, dAt.y, fmtLen(f.d));
+    }
   }
 
   // marquee
@@ -2179,6 +2189,7 @@ function updateToolbar() {
   $('btnSnap').classList.toggle('on', state.grid.snap);
   $('btnRulers').classList.toggle('on', state.showRulers);
   $('btnDims').classList.toggle('on', state.showDims);
+  $('btnSizes').classList.toggle('on', state.showFurnDims !== false);
   $('btnImperial').classList.toggle('on', state.units === 'imperial');
   $('btnMetric').classList.toggle('on', state.units === 'metric');
   $('btn2D').classList.toggle('on', viewMode === '2d');
@@ -2208,6 +2219,7 @@ function wireToolbar() {
   $('btnSnap').onclick = () => { state.grid.snap = !state.grid.snap; commit(); };
   $('btnRulers').onclick = () => { state.showRulers = !state.showRulers; commit(); };
   $('btnDims').onclick = () => { state.showDims = !state.showDims; commit(); };
+  $('btnSizes').onclick = () => { state.showFurnDims = state.showFurnDims === false; commit(); };
   $('btnZoomIn').onclick = () => viewMode === '3d' ? dolly3d(0.8) : zoomAt(CW / 2, CH / 2, 1.25);
   $('btnZoomOut').onclick = () => viewMode === '3d' ? dolly3d(1.25) : zoomAt(CW / 2, CH / 2, 0.8);
   $('zoomPct').onclick = () => { if (viewMode === '3d') { fitCam3d(); render(); } else zoomAt(CW / 2, CH / 2, BASE_SCALE / view.scale); };
