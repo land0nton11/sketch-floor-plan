@@ -27,6 +27,9 @@ python3 -m http.server 8000     # then visit http://localhost:8000
   Move, rotate (handle or numeric), resize (handles or typed dimensions), duplicate
   (Ctrl+D), z-order, labels, colors. Custom rectangles/circles (`R` / `C`) can be drawn at
   any size and saved into the palette ("My items") for reuse.
+- **Size tags on selection** — selecting a shape shows its width × depth in tags right on
+  the canvas (they follow rotation and live-update while resizing); the "Sizes" toolbar
+  button toggles them.
 - **Recolor anything** — select one or more placed pieces and use the color picker (live
   preview) or the quick swatches in the properties panel; width/depth/rotation/label are
   editable there too.
