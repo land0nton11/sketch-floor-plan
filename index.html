@@ -144,6 +144,23 @@
   .modal-close{position:absolute;}
   .modal-footer{display:flex; justify-content:flex-end; gap:8px; padding:0 16px 14px;}
 
+  /* ---------- mobile layout: sidebars become slide-in drawers ---------- */
+  .mobile-only{display:none;}
+  @media (max-width: 860px){
+    .mobile-only{display:inline-block;}
+    #main{grid-template-columns:1fr;}
+    #sidebar,#props{
+      position:fixed; top:var(--toolbar-h); bottom:var(--status-h); z-index:30;
+      width:min(80vw,300px); transition:transform .18s ease;
+      box-shadow:0 0 24px rgba(0,0,0,.2);
+    }
+    #sidebar{left:0; transform:translateX(-105%);}
+    #props{right:0; transform:translateX(105%); border-left:1px solid var(--border);}
+    #sidebar.open,#props.open{transform:translateX(0);}
+    #layoutName{display:none;}
+    #shortcuts{display:none;}
+  }
+
   /* toast */
   #toast{
     position:fixed; bottom:40px; left:50%; transform:translateX(-50%);
@@ -156,6 +173,9 @@
 <body>
 
 <div id="toolbar">
+  <button class="tb-btn mobile-only" id="btnPanelLeft" title="Tools &amp; furniture">☰ Tools</button>
+  <button class="tb-btn mobile-only" id="btnPanelRight" title="Properties of the selection">Item</button>
+  <div class="tb-sep mobile-only"></div>
   <div class="tb-group">
     <button class="tb-btn" id="btnNew" title="Start a new layout">New</button>
     <button class="tb-btn" id="btnSave" title="Save layout (Ctrl+S)">Save</button>
@@ -1490,7 +1510,7 @@ function findWallAt(p, thresholdPx = 14) {
 
 function hitVertex(p) {
   if (!roomClosed()) return null;
-  const th = (HANDLE_PX / 2 + 4) / view.scale;
+  const th = (coarse ? 15 : HANDLE_PX / 2 + 4) / view.scale;
   for (let i = 0; i < state.room.vertices.length; i++) {
     if (dist(p, state.room.vertices[i]) < th) return i;
   }
@@ -1523,14 +1543,15 @@ function hitOpening(p) {
 function hitRotateHandle(f, sp) {
   const cs = W2S(f);
   const local = rot(sub(sp, cs), -rad(f.rot));
-  return Math.hypot(local.x, local.y + f.d / 2 * view.scale + 22) < 9;
+  return Math.hypot(local.x, local.y + f.d / 2 * view.scale + 22) < (coarse ? 18 : 9);
 }
 function hitResizeHandle(f, sp) {
   const cs = W2S(f);
   const local = rot(sub(sp, cs), -rad(f.rot));
+  const slop = coarse ? 13 : HANDLE_PX / 2 + 3;
   for (const h of RESIZE_HANDLES) {
     const hx = h.x * f.w / 2 * view.scale, hy = h.y * f.d / 2 * view.scale;
-    if (Math.abs(local.x - hx) < HANDLE_PX / 2 + 3 && Math.abs(local.y - hy) < HANDLE_PX / 2 + 3) return h;
+    if (Math.abs(local.x - hx) < slop && Math.abs(local.y - hy) < slop) return h;
   }
   return null;
 }
@@ -1665,6 +1686,7 @@ const TOOL_HINTS = {
 function setTool(t) {
   cancelModes();
   tool = t;
+  $('sidebar').classList.remove('open');   // close the mobile drawer after picking a tool
   if (t !== 'select') clearSel();
   document.querySelectorAll('.tool-btn').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
   $('statusHint').textContent = TOOL_HINTS[t] || '';
@@ -1678,6 +1700,37 @@ function evtScreen(e) {
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 
+/* multi-touch: two fingers pinch-zoom / pan the view */
+const activePointers = new Map();
+let pinch = null;
+let coarse = false;             // last input was a finger → bigger hit targets
+
+function beginPinch() {
+  // cancel any in-progress single-finger drag cleanly (restore pre-drag state)
+  if (dragState && ['moveFurn', 'rotate', 'resize', 'vertex', 'opening'].includes(dragState.mode) && histUndo.length) {
+    state = JSON.parse(histUndo.pop());
+  }
+  dragState = null;
+  const pts = [...activePointers.values()];
+  const c0 = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+  pinch = {
+    d0: Math.max(20, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)),
+    scale0: view.scale,
+    world0: S2W(c0),
+  };
+}
+
+function movePinch() {
+  const pts = [...activePointers.values()];
+  if (pts.length < 2) return;
+  const dNow = Math.max(20, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+  const cNow = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+  view.scale = clamp(pinch.scale0 * dNow / pinch.d0, MIN_SCALE, MAX_SCALE);
+  view.x = pinch.world0.x - cNow.x / view.scale;
+  view.y = pinch.world0.y - cNow.y / view.scale;
+  render(); updateToolbar();
+}
+
 cvs.addEventListener('contextmenu', e => e.preventDefault());
 
 cvs.addEventListener('wheel', e => {
@@ -1687,10 +1740,18 @@ cvs.addEventListener('wheel', e => {
 }, { passive: false });
 
 cvs.addEventListener('pointerdown', e => {
-  cvs.setPointerCapture(e.pointerId);
+  try { cvs.setPointerCapture(e.pointerId); } catch (err) { /* synthetic/stale pointer */ }
   const sp = evtScreen(e);
   const wp = S2W(sp);
   pointerScreen = sp; pointerWorld = wp;
+  coarse = e.pointerType === 'touch';
+  if (coarse) {   // tapping the canvas dismisses any open drawer
+    $('sidebar').classList.remove('open');
+    $('props').classList.remove('open');
+  }
+  activePointers.set(e.pointerId, sp);
+  if (activePointers.size === 2) { beginPinch(); return; }
+  if (pinch) return;
 
   // pan: middle button, right button, or space+left
   if (e.button === 1 || e.button === 2 || (e.button === 0 && spaceDown)) {
@@ -1829,6 +1890,9 @@ cvs.addEventListener('pointermove', e => {
   shiftDown = e.shiftKey;
   altDown = e.altKey;
 
+  if (activePointers.has(e.pointerId)) activePointers.set(e.pointerId, sp);
+  if (pinch) { movePinch(); return; }
+
   updateStatusPos();
 
   if (!dragState) {
@@ -1935,7 +1999,17 @@ cvs.addEventListener('pointermove', e => {
   }
 });
 
+cvs.addEventListener('pointercancel', e => {
+  activePointers.delete(e.pointerId);
+  if (activePointers.size < 2) pinch = null;
+});
+
 cvs.addEventListener('pointerup', e => {
+  activePointers.delete(e.pointerId);
+  if (pinch) {
+    if (activePointers.size < 2) { pinch = null; scheduleAutosave(); }
+    return;
+  }
   const sp = evtScreen(e);
   const wp = S2W(sp);
   if (!dragState) return;
@@ -2121,6 +2195,14 @@ function updateToolbar() {
 }
 
 function wireToolbar() {
+  $('btnPanelLeft').onclick = () => {
+    $('props').classList.remove('open');
+    $('sidebar').classList.toggle('open');
+  };
+  $('btnPanelRight').onclick = () => {
+    $('sidebar').classList.remove('open');
+    $('props').classList.toggle('open');
+  };
   $('btnNew').onclick = doNew;
   $('btnSave').onclick = doSave;
   $('btnSaveAs').onclick = doSaveAs;
@@ -2195,6 +2277,7 @@ function paletteIcon(def) {
 function armPlacing(def, elItem) {
   cancelModes();
   if (tool !== 'select') setTool('select');
+  $('sidebar').classList.remove('open');   // close the mobile drawer so the canvas is visible
   placing = { def, ghost: null, onCanvas: false };
   elItem.classList.add('armed');
   $('statusHint').textContent = 'Click on the canvas to place “' + def.label + '” · Esc cancels';
@@ -2215,9 +2298,11 @@ function buildPalette() {
       item.addEventListener('pointerdown', e => {
         e.preventDefault();
         armPlacing(def, item);
+        const start = { x: e.clientX, y: e.clientY };
+        const overCanvas = ev => document.elementFromPoint(ev.clientX, ev.clientY) === cvs;
         const onMove = ev => {
-          const r = cvs.getBoundingClientRect();
-          if (ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom) {
+          if (placing && overCanvas(ev)) {
+            const r = cvs.getBoundingClientRect();
             pointerScreen = { x: ev.clientX - r.left, y: ev.clientY - r.top };
             pointerWorld = S2W(pointerScreen);
             const q = snapOn() ? gridSnapPt(pointerWorld) : pointerWorld;
@@ -2229,11 +2314,13 @@ function buildPalette() {
         const onUp = ev => {
           document.removeEventListener('pointermove', onMove);
           document.removeEventListener('pointerup', onUp);
-          const r = cvs.getBoundingClientRect();
-          if (placing && ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom) {
+          // drag-place only when the pointer really traveled onto the canvas;
+          // a plain tap/click stays armed so the next canvas tap places it
+          const moved = Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 10;
+          if (placing && moved && overCanvas(ev)) {
+            const r = cvs.getBoundingClientRect();
             placeFurnitureAt(def, S2W({ x: ev.clientX - r.left, y: ev.clientY - r.top }));
           }
-          // else: stay armed, next canvas click places it
         };
         document.addEventListener('pointermove', onMove);
         document.addEventListener('pointerup', onUp);
