@@ -592,6 +592,7 @@ function saveLayout(name) {
   setLayouts(layouts);
   state.name = name;
   updateToolbar();
+  scheduleAutosave();   // keep the restore-on-open copy in step with the new name
   toast('Saved “' + name + '”');
 }
 
