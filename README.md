@@ -12,6 +12,31 @@ static server:
 python3 -m http.server 8000     # then visit http://localhost:8000
 ```
 
+## Using it on a phone
+
+The layout adapts to small screens: the tool/furniture palette and the properties panel
+become slide-in drawers (the **☰ Tools** and **Item** buttons in the toolbar), the toolbar
+scrolls horizontally, and touch targets are enlarged. Drag one finger to draw, move, and
+resize; pinch with two fingers to zoom and pan.
+
+To reach it from a phone you need it served over the network rather than opened from disk.
+Two options:
+
+- **Same wifi** — run `python3 -m http.server 8000` on your computer and visit
+  `http://<your-computer-ip>:8000` on the phone.
+- **Hosted** — `tools/build-hosted.js` derives a build for hosts that inject page content
+  into their own document (it removes the `<!doctype>`/`<head>`/`<body>` wrapper and pins
+  the app to the viewport, so a host's own CSS reset can't disturb the layout):
+
+  ```sh
+  node tools/build-hosted.js            # writes hosted.html
+  node tools/build-hosted.js out.html   # or a path of your choice
+  ```
+
+  `index.html` stays the source of truth — re-run the script after editing it. Layouts are
+  saved per-origin in `localStorage`, so a hosted copy and a local copy keep separate
+  saves; move work between them with **JSON** export/import.
+
 ## What it does
 
 - **Draw the room to scale** — polygon wall tool (`W`): click to drop corners, Shift for
