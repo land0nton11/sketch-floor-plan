@@ -133,7 +133,7 @@
   #modalOverlay.show{display:flex;}
   #modalBox{
     background:var(--panel); border-radius:10px; box-shadow:0 12px 40px rgba(0,0,0,.25);
-    min-width:340px; max-width:460px; max-height:80vh; display:flex; flex-direction:column;
+    width:min(92vw,460px); max-height:80vh; display:flex; flex-direction:column;
   }
   #modalTitle{padding:14px 16px 6px; font-weight:600; font-size:15px;}
   #modalBody{padding:6px 16px 14px; overflow-y:auto;}
@@ -1559,18 +1559,19 @@ function hitResizeHandle(f, sp) {
 /* ---------------- room editing operations ---------------- */
 function closeRoomLoop() {
   if (!drawingVerts || drawingVerts.length < 3) return;
-  if (roomClosed() &&
-      !confirm('Replace the existing room outline? Doors and windows will be removed.')) {
-    return;
-  }
   pushHistory();
-  const hadOpenings = state.openings.length > 0;
+  const replaced = roomClosed();
+  const lostOpenings = state.openings.length;
   state.room.vertices = drawingVerts.map(v => ({ x: v.x, y: v.y }));
   state.openings = [];
   drawingVerts = null;
   setTool('select');
   commit();
-  if (hadOpenings) toast('Doors/windows were removed with the old walls');
+  if (replaced) {
+    toast(lostOpenings
+      ? 'Outline replaced — ' + lostOpenings + ' door/window removed with the old walls · Ctrl+Z to undo'
+      : 'Outline replaced · Ctrl+Z to undo');
+  }
 }
 
 function insertVertexAt(wallIdx, point) {
@@ -1592,16 +1593,16 @@ function deleteVertex(idx) {
   if (v.length <= 3) { toast('A room needs at least 3 corners'); return; }
   const n = v.length;
   const prevWall = (idx + n - 1) % n;
-  const affected = state.openings.filter(o => o.wall === idx || o.wall === prevWall);
-  if (affected.length &&
-      !confirm('Removing this corner merges two walls; ' + affected.length +
-               ' door/window on them will be deleted. Continue?')) return;
+  const affected = state.openings.filter(o => o.wall === idx || o.wall === prevWall).length;
   pushHistory();
   state.openings = state.openings.filter(o => o.wall !== idx && o.wall !== prevWall);
   for (const o of state.openings) if (o.wall > idx) o.wall--;
   v.splice(idx, 1);
   clearSel();
   commit();
+  if (affected) {
+    toast('Corner removed — ' + affected + ' door/window on the merged walls deleted · Ctrl+Z to undo');
+  }
 }
 
 function setSegmentLength(i, newLen) {
@@ -2165,7 +2166,58 @@ function openModal(title) {
   return body;
 }
 function closeModal() { $('modalOverlay').classList.remove('show'); }
-$('modalOverlay').addEventListener('click', e => { if (e.target === $('modalOverlay')) closeModal(); });
+function dismissModal() {   // backdrop click / Escape — lets pending askText/askConfirm resolve
+  const ov = $('modalOverlay');
+  if (!ov.classList.contains('show')) return;
+  ov.dispatchEvent(new Event('cancelled'));
+  closeModal();
+}
+$('modalOverlay').addEventListener('click', e => { if (e.target === $('modalOverlay')) dismissModal(); });
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('modalOverlay').classList.contains('show')) {
+    e.stopPropagation();
+    dismissModal();
+  }
+}, true);
+
+/* In-app dialogs. Native prompt()/confirm() are unreliable in hosted iframes
+   and clumsy on phones, so everything goes through the modal instead. */
+function askText(title, label, value, okLabel) {
+  return new Promise(resolve => {
+    const body = openModal(title);
+    const inp = el('input', { type: 'text', value: value || '' });
+    let done = false;
+    const finish = v => { if (done) return; done = true; closeModal(); resolve(v); };
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(inp.value.trim() || null); }
+      if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+    });
+    body.append(
+      propRow(label, inp),
+      el('div', { class: 'modal-footer' },
+        pBtn('Cancel', () => finish(null)),
+        pBtn(okLabel || 'OK', () => finish(inp.value.trim() || null))),
+    );
+    $('modalOverlay').addEventListener('cancelled', () => finish(null), { once: true });
+    inp.focus();
+    inp.select();
+  });
+}
+
+function askConfirm(title, message, okLabel, danger) {
+  return new Promise(resolve => {
+    const body = openModal(title);
+    let done = false;
+    const finish = v => { if (done) return; done = true; closeModal(); resolve(v); };
+    body.append(
+      el('div', { class: 'prop-note', text: message }),
+      el('div', { class: 'modal-footer' },
+        pBtn('Cancel', () => finish(false)),
+        pBtn(okLabel || 'OK', () => finish(true), danger)),
+    );
+    $('modalOverlay').addEventListener('cancelled', () => finish(false), { once: true });
+  });
+}
 
 function el(tag, attrs, ...children) {
   const n = document.createElement(tag);
@@ -2492,8 +2544,9 @@ function propsFurniture(p, f) {
       state.furniture = state.furniture.filter(x => x.id !== f.id); state.furniture.unshift(f); commit();
     }),
     pBtn('Duplicate', duplicateSelection),
-    pBtn('Save to palette', () => {
-      const name = prompt('Palette name for this item:', f.label || (def ? def.label : 'Custom'));
+    pBtn('Save to palette', async () => {
+      const name = await askText('Save to palette', 'Name',
+        f.label || (def ? def.label : 'Custom'), 'Save');
       if (!name) return;
       state.customPalette.push({
         key: 'cp_' + uid(), label: name, kind: f.kind, shape: f.shape,
@@ -2599,12 +2652,13 @@ function doSave() {
   saveLayout(state.name);
 }
 
-function doSaveAs() {
-  const name = prompt('Save layout as:', state.name === 'Untitled' ? 'My room' : state.name);
-  if (!name || !name.trim()) return;
-  const clean = name.trim();
-  if (getLayouts()[clean] && !confirm('“' + clean + '” exists. Overwrite?')) return;
-  saveLayout(clean);
+async function doSaveAs() {
+  const name = await askText('Save layout', 'Name',
+    state.name === 'Untitled' ? 'My room' : state.name, 'Save');
+  if (!name) return;
+  if (getLayouts()[name] &&
+      !await askConfirm('Overwrite?', '“' + name + '” already exists. Replace it with the current layout?', 'Overwrite')) return;
+  saveLayout(name);
   updateProps();
 }
 
@@ -2621,17 +2675,21 @@ function showLayoutsModal() {
       el('span', { class: 'lname', text: name }),
       el('span', { class: 'ldate', text: new Date(entry.saved).toLocaleDateString() }),
       pBtn('Load', () => { closeModal(); loadLayoutByName(name); }),
-      pBtn('Rename', () => {
-        const nn = prompt('Rename “' + name + '” to:', name);
-        if (!nn || !nn.trim() || nn.trim() === name) return;
+      pBtn('Rename', async () => {
+        const nn = await askText('Rename layout', 'New name', name, 'Rename');
+        if (!nn || nn === name) { showLayoutsModal(); return; }
         const l = getLayouts();
-        if (l[nn.trim()] && !confirm('“' + nn.trim() + '” exists. Overwrite?')) return;
-        l[nn.trim()] = l[name]; delete l[name]; setLayouts(l);
-        if (state.name === name) { state.name = nn.trim(); updateToolbar(); }
+        if (l[nn] && !await askConfirm('Overwrite?', '“' + nn + '” already exists. Replace it?', 'Overwrite')) {
+          showLayoutsModal(); return;
+        }
+        l[nn] = l[name]; delete l[name]; setLayouts(l);
+        if (state.name === name) { state.name = nn; updateToolbar(); }
         showLayoutsModal();
       }),
-      pBtn('Delete', () => {
-        if (!confirm('Delete saved layout “' + name + '”?')) return;
+      pBtn('Delete', async () => {
+        const ok = await askConfirm('Delete layout',
+          'Permanently delete the saved layout “' + name + '”? This cannot be undone.', 'Delete', true);
+        if (!ok) { showLayoutsModal(); return; }
         const l = getLayouts(); delete l[name]; setLayouts(l);
         showLayoutsModal();
       }, true),
